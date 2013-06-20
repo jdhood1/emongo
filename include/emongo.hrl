@@ -28,3 +28,4 @@
 -define(OP_GET_MORE, 2005).
 -define(OP_DELETE, 2006).
 -define(OP_KILL_CURSORS, 2007).
+-define(SYS_NAMESPACES, "system.namespaces").

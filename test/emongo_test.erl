@@ -18,7 +18,7 @@ setup() ->
   ok.
 
 cleanup(_) ->
-  emongo:delete_sync(?POOL, ?COLL),
+  emongo:drop_database(?POOL),
   ok.
 
 run_test_() ->
@@ -27,11 +27,28 @@ run_test_() ->
     fun cleanup/1,
     [
       fun test_upsert/0,
-      {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
+      fun test_fetch_collections/0,
+      {timeout, ?TIMEOUT div 1000, [fun test_performance/0]},
+      fun test_drop_collection/0,
+      fun test_drop_database/0,
+      fun test_upsert/0 %rerun upsert to make sure we can still do our work
     ]
   }].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+test_fetch_collections() ->
+  ?OUT("Testing collection names fetch", []),
+  [<<"system.indexes">>,<<"test">>] = lists:sort(emongo:get_collections(?POOL)).
+
+test_drop_collection() ->
+  ?OUT("Testing collection drop", []),
+    ok = emongo:drop_collection(?POOL, "test"),
+    false = lists:member(<<"test">>, emongo:get_collections(?POOL)).
+
+test_drop_database() ->
+  ?OUT("Testing databsae drop", []),
+  ok = emongo:drop_database(?POOL).
 
 test_upsert() ->
   ?OUT("Testing upsert", []),
@@ -57,16 +74,16 @@ test_upsert() ->
 
 test_performance() ->
   ?OUT("Testing performance.", []),
-  emongo:delete_sync(?POOL, ?COLL),
+%   emongo:delete_sync(?POOL, ?COLL),
   Start = cur_time_ms(),
-  try
-    Ref = make_ref(),
-    start_processes(Ref),
-    block_until_done(Ref)
-  after
-    % Clean up in case something failed.
-    emongo:delete_sync(?POOL, ?COLL)
-  end,
+%   try
+%     Ref = make_ref(),
+%     start_processes(Ref),
+%     block_until_done(Ref)
+%   after
+%     % Clean up in case something failed.
+%     emongo:delete_sync(?POOL, ?COLL)
+%   end,
   End = cur_time_ms(),
   ?OUT("Test passed in ~p ms\n", [End - Start]).
 

@@ -33,12 +33,13 @@
          update_all/4, update_sync/4, update_sync/5, update_sync/6,
          update_all_sync/4, update_all_sync/5, delete/2, delete/3,
          delete_sync/2, delete_sync/3, delete_sync/4, ensure_index/4, count/2,
-         aggregate/3, aggregate/4,
+         aggregate/3, aggregate/4, get_collections/1, get_collections/2,
          count/3, count/4, find_and_modify/4, find_and_modify/5, dec2hex/1,
-         hex2dec/1, utf8_encode/1]).
+         hex2dec/1, utf8_encode/1, drop_collection/2, drop_collection/3,
+         drop_database/1, drop_database/2]).
 
 -include("emongo.hrl").
-
+-include_lib("eunit/include/eunit.hrl").
 -record(state, {pools, oid_index, hashed_hostn}).
 
 %====================================================================
@@ -410,8 +411,79 @@ find_and_modify(PoolId, Collection, Selector, Update, Options)
     false -> Resp#response.documents
   end.
 
-%drop_collection(PoolId, Collection) when is_atom(PoolId), is_list(Collection) ->
+%====================================================================
+% db collection operations
+%====================================================================
+drop_collection(PoolId, Collection) -> drop_collection(PoolId, Collection, []).
 
+drop_collection(PoolId, Collection, Options) when is_atom(PoolId) ->
+  {Pid, Pool} = gen_server:call(?MODULE, {pid, PoolId}, infinity),
+  TQuery = create_query([], [{<<"drop">>, Collection}]),
+  Query = TQuery#emo_query{limit=-1}, %dont ask me why, it just has to be -1
+  Packet = emongo_packet:do_query(Pool#pool.database, "$cmd", Pool#pool.req_id, Query),
+  case send_recv_command(drop_collection, "$cmd", Query, [], Pid, Pool#pool.req_id, Packet, proplists:get_value(timeout, Options, ?TIMEOUT)) of
+    #response{documents=[Res]} ->
+        case lists:keyfind(<<"ok">>, 1, Res) of
+            {<<"ok">>, 1.0} -> ok;
+            _ ->
+                case lists:keyfind(<<"errmsg">>, 1, Res) of
+                    {<<"errmsg">>, Error} -> throw({drop_collection_failed, Error});
+                    _ -> throw({drop_collection_failed, lists:keyfind(<<"msg">>, 1, Res)})
+                end
+        end;
+    _ -> {drop_collection_failed, "oh snap, i dont know what happened"}
+  end.
+
+get_collections(PoolId) -> get_collections(PoolId, []).
+get_collections(PoolId, Options) when is_atom(PoolId) ->
+  {Pid, Pool} = gen_server:call(?MODULE, {pid, PoolId}, infinity),
+  Query = create_query(Options, []),
+  Packet = emongo_packet:do_query(Pool#pool.database, ?SYS_NAMESPACES, Pool#pool.req_id, Query),
+  case send_recv_command(get_collections, ?SYS_NAMESPACES, Query, Options, Pid, Pool#pool.req_id, Packet,  proplists:get_value(timeout, Options, ?TIMEOUT)) of
+    #response{documents=Docs} ->
+        Database = list_to_binary(Pool#pool.database ++ "."),
+        lists:foldl(fun(Doc, Accum) ->
+            Collection = proplists:get_value(<<"name">>, Doc),
+            case binary:match(Collection, <<".$_">>) of
+                nomatch ->
+                    [_Junk, RealName] = binary:split(Collection, Database),
+                    [ RealName | Accum ];
+                _ -> Accum
+            end
+        end, [], Docs);
+    _ -> undefined
+  end.
+
+%====================================================================
+% db holy cow operations
+%====================================================================
+%this is slightly ghetto fabulous, it just provides a very quick method to
+%truncate the entire db and trash all of the collections
+drop_database(PoolId) -> drop_database(PoolId, []).
+drop_database(PoolId, Options) ->
+    %doing this with emongo_conn:send_recv that way we do not get the last error from the
+    %dropped db
+  {Pid, Pool} = gen_server:call(?MODULE, {pid, PoolId}, infinity),
+  Selector = [{<<"dropDatabase">>, 1}],
+  TQuery = create_query([], Selector),
+  Query = TQuery#emo_query{limit=-1}, %dont ask me why, it just has to be -1
+  DropPacket = emongo_packet:do_query(Pool#pool.database, "$cmd", Pool#pool.req_id, Query),
+  try
+    case emongo_conn:send_recv(Pid, Pool#pool.req_id, DropPacket,  proplists:get_value(timeout, Options, ?TIMEOUT)) of
+        #response{documents=[Res]} ->
+            case lists:keyfind(<<"ok">>, 1, Res) of
+                {<<"ok">>, 1.0} -> ok;
+                _ ->
+                    case lists:keyfind(<<"errmsg">>, 1, Res) of
+                        {<<"errmsg">>, Err} -> throw({drop_database_failed, Err});
+                        _ -> throw({drop_database_failed, lists:keyfind(<<"msg">>, 1, Res)})
+                    end
+            end;
+        _ -> {drop_collection_failed, "oh snap, i dont know what happened"}
+    end
+  catch _:{emongo_conn_error, Error} ->
+    throw({emongo_conn_error, Error, "$cmd", "undefined", Selector, Options})
+  end.
 %====================================================================
 % gen_server callbacks
 %====================================================================
@@ -521,7 +593,7 @@ handle_info({'EXIT', _, normal}, State) ->
   {noreply, State};
 handle_info({'EXIT', Pid, {emongo_conn, PoolId, Error}},
             #state{pools=Pools}=State) ->
-  io:format("EXIT ~p, {emongo_conn, ~p, ~p} in ~p~n",
+  ?debugFmt("EXIT ~p, {emongo_conn, ~p, ~p} in ~p~n",
         [Pid, PoolId, Error, ?MODULE]),
   State1 =
     case get_pool(PoolId, Pools) of
