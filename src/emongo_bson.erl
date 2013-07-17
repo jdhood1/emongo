@@ -100,8 +100,13 @@ encode_key_value(Key, {datetime, Val}) ->
 encode_key_value(Key, {{Year, Month, Day}, {Hour, Min, Secs}}) when is_integer(Year), is_integer(Month), is_integer(Day), is_integer(Hour), is_integer(Min), is_integer(Secs) ->
 	encode_key_value(Key, {datetime, {{Year, Month, Day}, {Hour, Min, Secs}}});
 
-%% VOID
+%% UNDEFINED
 encode_key_value(Key, undefined) ->
+       Key1 = encode_key(Key),
+       <<6, Key1/binary, 0>>;
+
+%% NULL
+encode_key_value(Key, null) ->
 	Key1 = encode_key(Key),
 	<<10, Key1/binary, 0>>;
 
@@ -192,6 +197,10 @@ decode_value(5, <<_Size:32/little-signed, 2:8/little, BinSize:32/little-signed, 
 decode_value(5, <<Size:32/little-signed, SubType:8/little, BinData:Size/binary-little-unit:8, Tail/binary>>) ->
   	{{binary, SubType, BinData}, Tail};
 
+%% UNDEFINED
+decode_value(6, Tail) ->
+       {undefined, Tail};
+
 %% OID
 decode_value(7, <<OID:12/binary, Tail/binary>>) ->
 	{{oid, OID}, Tail};
@@ -211,7 +220,7 @@ decode_value(9, <<MSecs:64/little-signed, Tail/binary>>) ->
 	MicroSecs = (MSecs rem 1000) * 1000,
 	{{MegaSecs, Secs, MicroSecs}, Tail};
 
-%% VOID
+%% UNDEFINED
 decode_value(10, Tail) ->
 	{undefined, Tail};
 
