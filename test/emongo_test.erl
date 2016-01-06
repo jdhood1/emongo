@@ -221,3 +221,7 @@ ensure_started(App) ->
 
 cur_time_ms() ->
   erlang:system_time(seconds).
+% Note: use the following code if you need compatibility with Erlang < 18.1
+%  {MegaSec, Sec, MicroSec} = erlang:now(),
+%  MegaSec * 1000000000 + Sec * 1000 + erlang:round(MicroSec / 1000).
+
