@@ -155,9 +155,16 @@ queue_lengths() ->
 
 % The default database is passed in when a pool is created.  However, if you want to use that same pool to talk to other
 % databases, you can override the default database on a per-collection basis.  To do that, call this function.
-% Input is in the format [{Collection, Database}].
+% Input is either in the format [{Collection, Database}] or [{Collection, Database, AuthFlag}], where the AuthFlag is a
+% boolean that specifies whether to authenticate with the database.
+% If no AuthFlag is specified, the databases is authenticated.
 register_collections_to_databases(PoolId, CollDbMap) ->
-  ets:insert(?COLL_DB_MAP_ETS, [{{PoolId, to_binary(Collection)}, Database} || {Collection, Database} <- CollDbMap]),
+  Ets = lists:map(fun({Collection, Database}) ->
+                    {{PoolId, to_binary(Collection)}, Database, true};
+                     ({Collection, Database, AuthFlag}) ->
+                    {{PoolId, to_binary(Collection)}, Database, AuthFlag}
+                  end, CollDbMap),
+  ets:insert(?COLL_DB_MAP_ETS, Ets),
   gen_server:call(?MODULE, {authorize_new_dbs, PoolId}, 60000).
 
 %------------------------------------------------------------------------------
@@ -836,7 +843,7 @@ pass_hash(User, Pass) ->
 
 do_auth(_Conn, #pool{user = undefined, pass_hash = undefined} = Pool) -> Pool;
 do_auth(Conn, Pool) ->
-  RegisteredDBs = [Pool#pool.database | [DB || [DB] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1'})]],
+  RegisteredDBs = [Pool#pool.database | [DB || [DB, AuthFlag] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1', '$2'}), AuthFlag =:= true]],
   UniqueDBs = lists:usort(RegisteredDBs),
   do_auth(UniqueDBs, Conn, Pool).
 
@@ -996,8 +1003,9 @@ get_pool(PoolId, [Pool|Tail], Others) ->
 
 get_database(Pool, Collection) ->
   case ets:lookup(?COLL_DB_MAP_ETS, {Pool#pool.id, to_binary(Collection)}) of
-    [{_, Database}] -> Database;
-    _               -> Pool#pool.database
+    [{_, Database, true}]  -> Database;
+    [{_, Database, false}] -> throw({emongo_db_not_authenticated, Database});
+    _                      -> Pool#pool.database
   end.
 
 dec2hex(Dec) ->
