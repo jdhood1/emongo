@@ -749,7 +749,7 @@ handle_cast(_Msg, State) ->
 %                     {stop, Reason, State}
 % Description: Handling all non call/cast messages
 %--------------------------------------------------------------------
-handle_info({'EXIT', _, shudown}, State) ->
+handle_info({'EXIT', _, shutdown}, State) ->
   {noreply, State};
 
 handle_info({'EXIT', Pid, Error}, #state{pools = Pools} = State) ->
