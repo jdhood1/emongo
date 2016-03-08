@@ -129,7 +129,7 @@ loop(State = #state{socket = Socket,
     % timeout.
     % Throw a meaningful error that the emongo module can handle for connections that exit.
     case Error of
-      emongo_conn_close        -> exit(shudown);
+      emongo_conn_close        -> exit(shutdown);
       emongo_too_many_timeouts -> exit(normal);
       _                        ->
         ?EXCEPTION("Exiting: ~p", [Error]),
