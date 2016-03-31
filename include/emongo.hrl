@@ -46,6 +46,7 @@
                timeout               = 5000,
                write_concern         = 1,
                write_concern_timeout = 4000,
-               disconnect_timeouts   = 10}).
+               disconnect_timeouts   = 10,
+               max_wire_version      = undefined}).
 -record(header, {message_length, request_id, response_to, op_code}).
 -record(emo_query, {opts=0, offset=0, limit=16#7FFFFFFF, q=[], field_selector=[]}).

@@ -57,6 +57,7 @@
 -define(TIMING_KEY, emongo_timing).
 -define(MAX_TIMES,  10).
 -define(COLL_DB_MAP_ETS, emongo_coll_db_map).
+-define(SHA1_DIGEST_LEN, 20).
 
 -record(state, {pools, oid_index, hashed_hostn}).
 
@@ -154,10 +155,17 @@ queue_lengths() ->
 
 % The default database is passed in when a pool is created.  However, if you want to use that same pool to talk to other
 % databases, you can override the default database on a per-collection basis.  To do that, call this function.
-% Input is in the format [{Collection, Database}].
+% Input is either in the format [{Collection, Database}] or [{Collection, Database, AuthFlag}], where the AuthFlag is a
+% boolean that specifies whether to authenticate with the database.
+% If no AuthFlag is specified, the databases is authenticated.
 register_collections_to_databases(PoolId, CollDbMap) ->
-  ets:insert(?COLL_DB_MAP_ETS, [{{PoolId, to_binary(Collection)}, Database} || {Collection, Database} <- CollDbMap]),
-  gen_server:call(?MODULE, {authorize_new_dbs, PoolId}).
+  Ets = lists:map(fun({Collection, Database}) ->
+                    {{PoolId, to_binary(Collection)}, Database, true};
+                     ({Collection, Database, AuthFlag}) ->
+                    {{PoolId, to_binary(Collection)}, Database, AuthFlag}
+                  end, CollDbMap),
+  ets:insert(?COLL_DB_MAP_ETS, Ets),
+  gen_server:call(?MODULE, {authorize_new_dbs, PoolId}, 60000).
 
 %------------------------------------------------------------------------------
 % find
@@ -808,7 +816,11 @@ do_open_connections(#pool{id                  = PoolId,
     true ->
       % The emongo_conn:start_link function will throw an exception if it is unable to connect.
       {ok, Conn} = emongo_conn:start_link(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions),
-      NewPool = do_auth(Conn, Pool),
+      MaxWireVer = case Pool#pool.max_wire_version of
+        undefined -> get_max_wire_version("admin", Pool, Conn);
+        Ver       -> Ver
+      end,
+      NewPool = do_auth(Conn, Pool#pool{max_wire_version = MaxWireVer}),
       do_open_connections(NewPool#pool{conns = queue:in(Conn, Conns)});
     false -> Pool
   end.
@@ -831,11 +843,62 @@ pass_hash(User, Pass) ->
 
 do_auth(_Conn, #pool{user = undefined, pass_hash = undefined} = Pool) -> Pool;
 do_auth(Conn, Pool) ->
-  RegisteredDBs = [Pool#pool.database | [DB || [DB] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1'})]],
+  RegisteredDBs = [Pool#pool.database | [DB || [DB, AuthFlag] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1', '$2'}), AuthFlag =:= true]],
   UniqueDBs = lists:usort(RegisteredDBs),
   do_auth(UniqueDBs, Conn, Pool).
 
 do_auth([], _Conn, Pool) -> Pool;
+do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) when Pool#pool.max_wire_version >= 3 ->
+  Bytes = crypto:rand_bytes(6),
+  ClientNonce = base64:encode(emongo:dec2hex(Bytes)),
+
+  % Client initiates SCRAM auth session with username and a random number (ClientNonce)
+  FirstBare = <<"n=", User/binary, ",r=", ClientNonce/binary>>,
+  Payload1 = <<"n,,", FirstBare/binary>>,
+  Query1 = #emo_query{q=[{<<"saslStart">>, 1},
+                         {<<"mechanism">>, <<"SCRAM-SHA-1">>},
+                         {<<"payload">>, base64:encode(Payload1)},
+                         {<<"autoAuthorize">>, 1}], limit=1},
+  {RespDoc1, RespPayload1} = scram_authorize_conn(DB, Pool, Query1, Conn),
+  ConId = proplists:get_value(<<"conversationId">>, RespDoc1),
+  EncodedPayload = proplists:get_value(<<"payload">>, RespDoc1),
+  ServerFirst = base64:decode(EncodedPayload),
+
+  % Server issues a challenge and Client responds with a proof
+  Iterations = proplists:get_value(<<"i">>, RespPayload1),
+  Salt = proplists:get_value(<<"s">>, RespPayload1),
+  Rnonce = proplists:get_value(<<"r">>, RespPayload1),
+  Iter = list_to_integer(binary_to_list(Iterations)),
+  WithoutProof = <<"c=biws,r=", Rnonce/binary>>,
+  SaltedPass  = salt_password(PassHash, base64:decode(Salt), Iter),
+  ClientKey = crypto:hmac(sha, SaltedPass, <<"Client Key">>),
+  StoredKey = crypto:hash(sha, ClientKey),
+  AuthMsg = <<FirstBare/binary, ",", ServerFirst/binary, ",", WithoutProof/binary>>,
+  ClientSig = crypto:hmac(sha, StoredKey, AuthMsg),
+  XorVal = base64:encode(crypto:exor(ClientKey, ClientSig)),
+  Payload2 = <<WithoutProof/binary, ",p=", XorVal/binary>>,
+  Query2 = #emo_query{q=[{<<"saslContinue">>, 1},
+                         {<<"conversationId">>, ConId},
+                         {<<"payload">>, base64:encode(Payload2)}], limit=1},
+  {RespDoc2, RespPayload2} = scram_authorize_conn(DB, Pool, Query2, Conn),
+
+  % Client verifies the server's proof
+  ServerKey = crypto:hmac(sha, SaltedPass, <<"Server Key">>),
+  ServerSig = base64:encode(crypto:hmac(sha, ServerKey, AuthMsg)),
+  ServerSigResponse = proplists:get_value(<<"v">>, RespPayload2),
+  if ServerSigResponse =/= ServerSig ->
+    throw({emongo_authentication_failed, <<"Server proof could not be verified">>});
+    true -> ok
+  end,
+  case proplists:get_bool(<<"done">>, RespDoc2) of
+    false -> Noop = #emo_query{q=[{<<"saslContinue">>, 1},
+                                  {<<"conversationId">>, ConId},
+                                  {<<"payload">>, base64:encode(<<"">>)}], limit=1},
+             authorize_conn_for_db(DB, Pool, Noop, Conn);
+    true  -> ok
+  end,
+  do_auth(Others, Conn, Pool#pool{req_id = Pool#pool.req_id + 1});
+
 do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) ->
   Nonce = case getnonce(Conn, DB, Pool) of
     error -> throw(emongo_getnonce);
@@ -847,6 +910,19 @@ do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) ->
   authorize_conn_for_db(DB, Pool, Query, Conn),
   do_auth(Others, Conn, Pool#pool{req_id = Pool#pool.req_id + 1}).
 
+get_max_wire_version(DB, Pool, Conn) ->
+  IsMasterQuery = #emo_query{q = [{<<"isMaster">>, 1}], limit = 1},
+  Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, IsMasterQuery),
+  Resp = send_recv_command(do_auth, "$cmd", undefined, [], Conn, Pool, Packet),
+  [Res] = Resp#response.documents,
+  case proplists:get_value(<<"ok">>, Res) of
+    1.0 -> case proplists:get_value(<<"maxWireVersion">>, Res) of
+             undefined -> 0;
+             Version   -> Version
+           end;
+    _   -> 0
+  end.
+
 authorize_conn_for_db(DB, Pool, Query, Conn) ->
   Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, Query),
   Resp = send_recv_command(do_auth, "$cmd", undefined, [], Conn, Pool, Packet),
@@ -855,6 +931,54 @@ authorize_conn_for_db(DB, Pool, Query, Conn) ->
     1.0 -> ok;
     _   -> throw({emongo_authentication_failed, proplists:get_value(<<"errmsg">>, Res)})
   end.
+
+scram_authorize_conn(DB, Pool, Query, Conn) ->
+  Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, Query),
+  Resp = send_recv_command(scram_authorize_conn, "$cmd", undefined, [], Conn, Pool, Packet),
+  [Res] = Resp#response.documents,
+  case proplists:get_value(<<"ok">>, Res) of
+    1.0 -> EncodedPayload = proplists:get_value(<<"payload">>, Res),
+           Payload = parse_scram_response(base64:decode(EncodedPayload)),
+           {Res, Payload};
+    _   -> throw({emongo_authentication_failed, proplists:get_value(<<"errmsg">>, Resp)})
+  end.
+
+parse_scram_response(Resp) ->
+  lists:map(fun(X) ->
+    case re:split(X, "=", [{return, binary}, {parts, 2}]) of
+      [Key, Value] -> {Key, Value};
+                 _ -> {undefined,  undefined}
+    end
+  end, re:split(Resp, <<",">>)).
+
+salt_password(Password, Salt, Iterations) ->
+  salt_password(Password, Salt, Iterations, 1, []).
+
+salt_password(Password, Salt, Iterations, BlockIndex, Acc) ->
+  DigestLength = ?SHA1_DIGEST_LEN,
+  case iolist_size(Acc) > DigestLength of
+    true ->
+      <<Bin:DigestLength/binary, _/binary>> = iolist_to_binary(lists:reverse(Acc)),
+      Bin;
+    false ->
+      Block = sha_hash_block(Password, Salt, Iterations, BlockIndex, 1, <<>>, <<>>),
+      salt_password(Password, Salt, Iterations, BlockIndex + 1, [Block | Acc])
+  end.
+
+sha_hash_block(_Password, _Salt, Iterations, _BlockIndex, Iteration, _PrevBlock, Acc) when Iteration > Iterations ->
+  Acc;
+
+sha_hash_block(Password, Salt, Iterations, BlockIndex, 1, _PrevBlock, _Acc) ->
+  InitCtx = crypto:hmac_init(sha, Password),
+  NewCtx = crypto:hmac_update(InitCtx, <<Salt/binary, BlockIndex:32/integer>>),
+  InitialBlock = crypto:hmac_final(NewCtx),
+  sha_hash_block(Password, Salt, Iterations, BlockIndex, 2, InitialBlock, InitialBlock);
+
+sha_hash_block(Password, Salt, Iterations, BlockIndex, Iteration, PrevBlock, Acc) ->
+  InitCtx = crypto:hmac_init(sha, Password),
+  NewCtx = crypto:hmac_update(InitCtx, PrevBlock),
+  NextBlock = crypto:hmac_final(NewCtx),
+  sha_hash_block(Password, Salt, Iterations, BlockIndex, Iteration + 1, NextBlock, crypto:exor(NextBlock, Acc)).
 
 getnonce(Conn, DB, Pool) ->
   Query1 = #emo_query{q=[{<<"getnonce">>, 1}], limit=1},
@@ -879,8 +1003,9 @@ get_pool(PoolId, [Pool|Tail], Others) ->
 
 get_database(Pool, Collection) ->
   case ets:lookup(?COLL_DB_MAP_ETS, {Pool#pool.id, to_binary(Collection)}) of
-    [{_, Database}] -> Database;
-    _               -> Pool#pool.database
+    [{_, Database, true}]  -> Database;
+    [{_, Database, false}] -> throw({emongo_db_not_authenticated, Database});
+    _                      -> Pool#pool.database
   end.
 
 dec2hex(Dec) ->
@@ -1168,10 +1293,10 @@ to_list(V) when is_binary(V) -> binary_to_list(V);
 to_list(V) when is_atom(V)   -> atom_to_list(V).
 
 cur_time_ms() ->
-  % TODO: With Erlang ver 18.1, this function will service nicely:
-  %os:system_time(milli_seconds).
-  {MegaSec, Sec, MicroSec} = os:timestamp(),
-  MegaSec * 1000000000 + Sec * 1000 + erlang:round(MicroSec / 1000).
+  os:system_time(milli_seconds).
+% Note: use the following code if you need compatibility with Erlang < 18.1
+%  {MegaSec, Sec, MicroSec} = os:timestamp(),
+%  MegaSec * 1000000000 + Sec * 1000 + erlang:round(MicroSec / 1000).
 
 convert_fields([])                    -> [];
 convert_fields([{Field, Val} | Rest]) -> [{Field, Val} | convert_fields(Rest)];
