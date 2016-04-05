@@ -40,6 +40,7 @@ run_test_() ->
       fun test_upsert/0, % rerun upsert to make sure we can still do our work
       fun test_empty_sel_with_orderby/0,
       fun test_count/0,
+      fun test_find_one/0,
       fun test_encoding_performance/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
@@ -119,6 +120,13 @@ test_count() ->
                                ?FIND_OPTIONS)),
   ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"$and">>, [[{<<"a">>, [{gte, 2}]}], [{<<"a">>, [{lte, 4}]}]]}],
                                ?FIND_OPTIONS)),
+  clear_coll(),
+  ?OUT("Test passed", []).
+
+test_find_one() ->
+  ?OUT("Testing find_one", []),
+  emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}], [{<<"a">>, 2}], [{<<"a">>, 3}], [{<<"a">>, 3}]]),
+  ?assertEqual(1, length(emongo:find_one(?POOL, ?COLL, [{<<"a">>, 2}], ?FIND_OPTIONS))),
   clear_coll(),
   ?OUT("Test passed", []).
 
