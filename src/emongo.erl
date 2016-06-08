@@ -122,6 +122,7 @@ add_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
 create_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
   Def = #pool{},
   Timeout             = proplists:get_value(timeout,               Options, Def#pool.timeout),
+  AuthDatabase        = proplists:get_value(auth_db,               Options, undefined),
   User      = to_binary(proplists:get_value(user,                  Options, Def#pool.user)),
   Password  = to_binary(proplists:get_value(password,              Options, undefined)),
   MaxPipelineDepth    = proplists:get_value(max_pipeline_depth,    Options, Def#pool.max_pipeline_depth),
@@ -135,6 +136,7 @@ create_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
         database              = DefaultDatabase,
         size                  = Size,
         timeout               = Timeout,
+        auth_db               = AuthDatabase,
         user                  = User,
         pass_hash             = pass_hash(User, Password),
         max_pipeline_depth    = MaxPipelineDepth,
@@ -817,7 +819,7 @@ do_open_connections(#pool{id                  = PoolId,
       % The emongo_conn:start_link function will throw an exception if it is unable to connect.
       {ok, Conn} = emongo_conn:start_link(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions),
       MaxWireVer = case Pool#pool.max_wire_version of
-        undefined -> get_max_wire_version("admin", Pool, Conn);
+        undefined -> get_max_wire_version(<<"admin">>, Pool, Conn);
         Ver       -> Ver
       end,
       NewPool = do_auth(Conn, Pool#pool{max_wire_version = MaxWireVer}),
@@ -842,6 +844,8 @@ pass_hash(User, Pass) ->
   emongo:dec2hex(erlang:md5(<<User/binary, ":mongo:", Pass/binary>>)).
 
 do_auth(_Conn, #pool{user = undefined, pass_hash = undefined} = Pool) -> Pool;
+do_auth(Conn, #pool{auth_db = AuthDatabase} = Pool) when AuthDatabase =/= undefined ->
+  do_auth([AuthDatabase], Conn, Pool);
 do_auth(Conn, Pool) ->
   RegisteredDBs = [Pool#pool.database | [DB || [DB, AuthFlag] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1', '$2'}), AuthFlag =:= true]],
   UniqueDBs = lists:usort(RegisteredDBs),
@@ -1004,7 +1008,11 @@ get_pool(PoolId, [Pool|Tail], Others) ->
 get_database(Pool, Collection) ->
   case ets:lookup(?COLL_DB_MAP_ETS, {Pool#pool.id, to_binary(Collection)}) of
     [{_, Database, true}]  -> Database;
-    [{_, Database, false}] -> throw({emongo_db_not_authenticated, Database});
+    [{_, Database, false}] -> % If an auth db was given, assume that the user has roles to access all other dbs
+                              case Pool#pool.auth_db of 
+                                undefined -> throw({emongo_db_not_authenticated, Database});
+                                _         -> Database
+                              end;
     _                      -> Pool#pool.database
   end.
 

@@ -37,6 +37,7 @@
                port,
                database,
                size                  = 1,
+               auth_db               = undefined,
                user                  = undefined,
                pass_hash             = undefined,
                max_pipeline_depth    = 0,

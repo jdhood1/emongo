@@ -8,6 +8,9 @@
 -define(USE_PRIMARY, use_primary).
 -define(OPLOG, 8).
 -define(NO_CURSOR_TIMEOUT, 16).
+-define(AWAIT_DATA, 32).
+-define(EXHAUST, 64).
+-define(PARTIAL, 128).
 
 -define(EMONGO_PUBLIC, true).
 -endif.
