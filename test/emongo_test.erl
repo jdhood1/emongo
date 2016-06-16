@@ -192,7 +192,7 @@ run_single_test(X, Y) ->
   Selector = [{<<"_id">>, Num}],
   try
     IRes = emongo:insert_sync(?POOL, ?COLL, Selector, [response_options]),
-    ok = check_result("insert_sync", IRes, 0),
+    ok = check_result(insert_sync, IRes, 0),
 
     [FMRes] = emongo:find_and_modify(?POOL, ?COLL, Selector,
       [{<<"$set">>, [{<<"fm">>, Num}]}], [{new, true}]),
@@ -201,13 +201,13 @@ run_single_test(X, Y) ->
 
     URes = emongo:update_sync(?POOL, ?COLL, Selector,
       [{<<"$set">>, [{<<"us">>, Num}]}], false, [response_options]),
-    ok = check_result("update_sync", URes, 1),
+    ok = check_result(update_sync, URes, 1),
 
     FARes = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
     ?assertEqual([Selector ++ [{<<"fm">>, Num}, {<<"us">>, Num}]], FARes),
 
     DRes = emongo:delete_sync(?POOL, ?COLL, Selector, [response_options]),
-    ok = check_result("delete_sync", DRes, 1)
+    ok = check_result(delete_sync, DRes, 1)
   catch _:E ->
     ?OUT("Exception occurred for test ~.16b: ~p\n~p\n",
               [Num, E, erlang:get_stacktrace()]),
@@ -217,12 +217,15 @@ run_single_test(X, Y) ->
 check_result(Desc,
              {response, _,_,_,_,_, [List]},
              ExpectedN) when is_list(List) ->
-  {_, Err} = lists:keyfind(<<"err">>, 1, List),
-  {_, N}   = lists:keyfind(<<"n">>,   1, List),
+  Ok  = proplists:get_value(<<"ok">>, List),
+  Err = proplists:get_value(<<"err">>, List),
+  N   = proplists:get_value(<<"n">>, List),
   if Err == undefined, N == ExpectedN -> ok;
-  true ->
-    ?OUT("Unexpected result for ~p: Err = ~p; N = ~p", [Desc, Err, N]),
-    throw({error, invalid_db_response})
+     Ok == 1, Err == undefined, Desc == insert_sync, N == 1 -> ok;
+     Ok == 1, Err == undefined, N == ExpectedN -> ok;
+     true ->
+       ?OUT("Unexpected result for ~p: Ok = ~p; Err = ~p; N = ~p", [Desc, Ok, Err, N]),
+       throw({error, invalid_db_response})
   end.
 
 block_until_done(Ref) ->

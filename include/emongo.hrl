@@ -47,6 +47,7 @@
                timeout               = 5000,
                write_concern         = 1,
                write_concern_timeout = 4000,
+               journal_write_ack     = false,
                disconnect_timeouts   = 10,
                max_wire_version      = undefined}).
 -record(header, {message_length, request_id, response_to, op_code}).

@@ -45,6 +45,22 @@ start the app and then add as many pools as you like
 	application:start(emongo).
 	emongo:add_pool(pool1, "localhost", 27017, "testdatabase", 1).
 
+#### Pool options
+
+	Option                    | Description                               | Default
+	--------------------------|-------------------------------------------|--------
+	__timeout__               | Database timeout (in ms)                  | 5000 ms
+	__auth_db__               | Database to use for authentication.  If undefined, emongo authenticates against the pool's database and any databases specified through register_collections_to_databases | undefined
+	__user__                  | User name used for authentication         | undefined
+	__password__              | Password to use for authentication        | undefined
+	__max_pipeline_depth__    | The maximum number of messages that are waiting for a response from the DB that can be sent across a socket before receiving a reply | 1
+	__socket_options__        | List of TCP socket options                | []
+	__write_concern__         | MongoDB Write Concern option              | 1
+	__write_concern_timeout__ | MongoDB Write Concern timeout (ms)        | 4000 ms
+	__journal_write_ack__     | MongoDB Journal wait for write ACK option | false
+	__disconnect_timeouts__   | Number of consecutive timeouts allowed on a socket before the socket is disconnected and reconnect | 10
+	__default_read_pref__     | Default read preference (primary, primaryPreferred, secondary, secondaryPreferred, nearest) | primary
+
 ## API Type Reference
 
 __PoolId__ = atom()  
@@ -79,7 +95,7 @@ __Pool__ = #pool{id, host, port, database, size, user, pass_hash, conn_pids, req
 ## Add Pool
 
 	emongo:add_pool(PoolId, Host, Port, Database, PoolSize) -> ok
-	emongo:add_pool(PoolId, Host, Port, Database, PoolSize, User, Pass) -> ok
+	emongo:add_pool(PoolId, Host, Port, Database, PoolSize, Options) -> ok
 
 ## Remove Pool
 
@@ -112,9 +128,10 @@ __Pool__ = #pool{id, host, port, database, size, user, pass_hash, conn_pids, req
 
 ## Update
 
-	%% by default upsert == false
+	%% by default, Upsert == false
 	emongo:update(PoolId, CollectionName, Selector, Document) -> ok
 	emongo:update(PoolId, CollectionName, Selector, Document, Upsert) -> ok
+	emongo:update(PoolId, CollectionName, Selector, Document, Upsert, Options) -> ok
 
 ### Examples
 
@@ -125,6 +142,7 @@ __Pool__ = #pool{id, host, port, database, size, user, pass_hash, conn_pids, req
 
 	%% update all is the same as update, except that the multi flag is set to true.
 	emongo:update_all(PoolId, CollectionName, Selector, Document) -> ok
+	emongo:update_all(PoolId, CollectionName, Selector, Document, Options) -> ok
 
 ## Delete
 
@@ -133,10 +151,11 @@ __Pool__ = #pool{id, host, port, database, size, user, pass_hash, conn_pids, req
 
 	%% delete all documents in a collection that match a selector
 	emongo:delete(PoolId, CollectionName, Selector) -> ok
+	emongo:delete(PoolId, CollectionName, Selector, Options) -> ok
 
-## Get Last Error
+## Synchronous Requests
 
-Insert, update, and delete each have a counter part, insert_sync, update_sync, and delete_sync, that calls getLastError after performing the action.  These calls block until the action has completed on the Mongo server.
+Insert, update, and delete each have a synchronous version, insert_sync, update_sync, and delete_sync, that block until the action has completed on the MongoDB server.  The result is then verified to ensure it was successful.  To instead request that the result document is returned, use the response_options option.
 
 	emongo:insert_sync(PoolId, CollectionName, Documents) -> ok
 	emongo:insert_sync(PoolId, CollectionName, Documents, Options) -> ok
@@ -145,17 +164,25 @@ Insert, update, and delete each have a counter part, insert_sync, update_sync, a
 	emongo:update_sync(PoolId, CollectionName, Selector, Document, Upsert) -> ok | {emongo_no_match_found, Error}
 	emongo:update_sync(PoolId, CollectionName, Selector, Document, Upsert, Options) -> ok | {emongo_no_match_found, Error}
 
-	emongo:update_all_sync(PoolId, Collection, Selector, Document) -> ok
-	emongo:update_all_sync(PoolId, Collection, Selector, Document, Options) -> ok
+	emongo:update_all_sync(PoolId, CollectionName, Selector, Document) -> ok
+	emongo:update_all_sync(PoolId, CollectionName, Selector, Document, Options) -> ok
 
 	emongo:delete_sync(PoolId, CollectionName) -> ok | {emongo_no_match_found, Error}
 	emongo:delete_sync(PoolId, CollectionName, Selector) -> ok | {emongo_no_match_found, Error}
-	emongo:delete_sync(PoolId, Collection, Selector, Options) -> ok | {emongo_no_match_found, Error}
+	emongo:delete_sync(PoolId, CollectionName, Selector, Options) -> ok | {emongo_no_match_found, Error}
 
 ## Find
 
-All find operations default to "slaveOk".  If the primary Mongo server is to be used for the latest copy of the data, the option ?USE_PRIMARY is available.
+All find operations default to "primary" (__?USE_PRIMARY__).  To use a different read preference, use one of the following pre-defined options:
 
+        Option             | Description
+	-------------------|--------------------
+	__?USE_PRIM_PREF__ | Primary Preferred
+	__?USE_SECONDARY__ | Secondary
+	__?USE_SECD_PREF__ | Secondary Preferred
+	__?USE_NEAREST__   | Nearest
+
+	emongo:find(PoolId, CollectionName, Selector) -> Result
 	emongo:find(PoolId, CollectionName, Selector, Options) -> Result
 
 ### Examples
