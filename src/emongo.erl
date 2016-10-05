@@ -58,6 +58,8 @@
 -define(MAX_TIMES,  10).
 -define(EMONGO_CONFIG, emongo_config).
 -define(SHA1_DIGEST_LEN, 20).
+-define(IS_MONGO_2_6(MaxWireVersion), (MaxWireVersion >= 3)).
+-define(IS_MONGO_3_2(MaxWireVersion), (MaxWireVersion >= 4)).
 
 -record(state, {pools, oid_index, hashed_hostn}).
 
@@ -301,7 +303,7 @@ insert_sync(PoolId, Collection, DocumentsIn, Options) ->
     ?IS_DOCUMENT(DocumentsIn)          -> [DocumentsIn]
   end,
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  if Pool#pool.max_wire_version >= 3 ->
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
        InsertDoc = [{<<"documents">>, {array, Documents}},
                     get_ordered_option(Options),
                     get_writeconcern_option(Options, Pool)],
@@ -377,7 +379,7 @@ update_sync(PoolId, Collection, Selector, Document, Upsert, Options)
     true -> Options;
     _    -> [check_match_found | Options]
   end,
-  if Pool#pool.max_wire_version >= 3 ->
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
        UpdateDoc = [{<<"updates">>, [[{<<"q">>,      {struct, transform_selector(Selector)}},
                                       {<<"u">>,      {struct, Document}},
                                       {<<"upsert">>, Upsert}]]},
@@ -413,7 +415,7 @@ update_all_sync(PoolId, Collection, Selector, Document)
 update_all_sync(PoolId, Collection, Selector, Document, Options)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  if Pool#pool.max_wire_version >= 3 ->
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
        UpdateDoc = [{<<"updates">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
                                       {<<"u">>,     {struct, Document}},
                                       {<<"multi">>, true}]]},
@@ -470,7 +472,7 @@ delete_sync(PoolId, Collection, Selector) ->
 
 delete_sync(PoolId, Collection, Selector, Options) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  if Pool#pool.max_wire_version >= 3 ->
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
        DeleteDoc = [{<<"deletes">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
                                       {<<"limit">>, 0}]]},
                     get_ordered_option(Options),
@@ -555,6 +557,9 @@ aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
 %% find_and_modify
 % Options can include:
 %   {timeout, integer()} (timeout in milliseconds)
+%   {write_concern, string() | integer()} (version 3.2 or later)
+%   {write_concern_timeout, integer()} (timeout in milliseconds) (version 3.2 or later)
+%   {journal_write_ack, boolean()} (version 3.2 or later)
 %%------------------------------------------------------------------------------
 find_and_modify(PoolId, Collection, Selector, Update) ->
   find_and_modify(PoolId, Collection, Selector, Update, []).
@@ -566,7 +571,10 @@ find_and_modify(PoolId, Collection, Selector, Update, Options)
   FindModDoc   = [{<<"query">>, {struct, transform_selector(Selector)}},
                   {<<"update">>, Update},
                   {<<"maxTimeMS">>, Timeout}],
-  Query        = create_cmd(<<"findandmodify">>, Collection, FindModDoc, undefined,
+  WriteConcern = if ?IS_MONGO_3_2(Pool#pool.max_wire_version) -> [get_writeconcern_option(Options, Pool)];
+                    true -> []
+                 end,
+  Query        = create_cmd(<<"findandmodify">>, Collection, FindModDoc ++ WriteConcern, undefined,
                             % We don't want to force the limit to 1, but want to default it to 1 if it's not in Options.
                             [{limit, 1} | Options]),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
@@ -940,7 +948,7 @@ do_auth(Conn, Pool) ->
   do_auth(UniqueDBs, Conn, Pool).
 
 do_auth([], _Conn, Pool) -> Pool;
-do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) when Pool#pool.max_wire_version >= 3 ->
+do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) when ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
   Bytes = crypto:rand_bytes(6),
   ClientNonce = base64:encode(emongo:dec2hex(Bytes)),
 
