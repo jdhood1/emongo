@@ -56,7 +56,7 @@
 
 -define(TIMING_KEY, emongo_timing).
 -define(MAX_TIMES,  10).
--define(COLL_DB_MAP_ETS, emongo_coll_db_map).
+-define(EMONGO_CONFIG, emongo_config).
 -define(SHA1_DIGEST_LEN, 20).
 
 -record(state, {pools, oid_index, hashed_hostn}).
@@ -116,7 +116,12 @@ add_pool(PoolId, Host, Port, DefaultDatabase, Size) ->
 %   % disconnect_timeouts is the number of consecutive timeouts allowed on a socket before the socket is disconnected
 %   % and reconnect.  0 means even the first timeout will cause a disconnect and reconnect.
 %   {disconnect_timeouts, int()}
+%   {default_read_pref, string()} % https://docs.mongodb.com/manual/core/read-preference/
+%      primary, primaryPreferred, secondary, secondaryPreferred, nearest
+
 add_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
+  DefaultReadPref = to_binary(proplists:get_value(default_read_pref, Options, undefined)),
+  ets:insert(?EMONGO_CONFIG, {{default_read_pref, PoolId}, DefaultReadPref}),
   gen_server:call(?MODULE, {add_pool, create_pool(PoolId, Host, Port, DefaultDatabase, Size, Options)}, infinity).
 
 create_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
@@ -161,12 +166,11 @@ queue_lengths() ->
 % boolean that specifies whether to authenticate with the database.
 % If no AuthFlag is specified, the databases is authenticated.
 register_collections_to_databases(PoolId, CollDbMap) ->
-  Ets = lists:map(fun({Collection, Database}) ->
-                    {{PoolId, to_binary(Collection)}, Database, true};
-                     ({Collection, Database, AuthFlag}) ->
-                    {{PoolId, to_binary(Collection)}, Database, AuthFlag}
-                  end, CollDbMap),
-  ets:insert(?COLL_DB_MAP_ETS, Ets),
+  Ets = lists:map(fun
+    ({Collection, Database})           -> {{coll_to_db, PoolId, to_binary(Collection)}, Database, true};
+    ({Collection, Database, AuthFlag}) -> {{coll_to_db, PoolId, to_binary(Collection)}, Database, AuthFlag}
+  end, CollDbMap),
+  ets:insert(?EMONGO_CONFIG, Ets),
   gen_server:call(?MODULE, {authorize_new_dbs, PoolId}, 60000).
 
 %------------------------------------------------------------------------------
@@ -196,7 +200,7 @@ find(PoolId, Collection, Selector) -> find(PoolId, Collection, Selector, []).
 find(PoolId, Collection, Selector, OptionsIn) when ?IS_DOCUMENT(Selector),
                                                    is_list(OptionsIn) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Options = set_slave_ok(OptionsIn),
+  Options = set_read_preference(PoolId, OptionsIn),
   Query = create_query(Options, Selector),
   Packet = emongo_packet:do_query(get_database(Pool, Collection), Collection,
                                   Pool#pool.req_id, Query),
@@ -431,7 +435,7 @@ count(PoolId, Collection, Selector) ->
   count(PoolId, Collection, Selector, []).
 
 count(PoolId, Collection, Selector, OptionsIn) ->
-  Options      = set_slave_ok(OptionsIn),
+  Options      = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   Query        = create_cmd(<<"count">>, Collection, Selector, [], 1, Options),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
@@ -454,7 +458,7 @@ aggregate(PoolId, Collection, Pipeline) ->
   aggregate(PoolId, Collection, Pipeline, []).
 
 aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
-  Options      = set_slave_ok(OptionsIn),
+  Options      = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   Query        = create_cmd(<<"aggregate">>, Collection, undefined, [{<<"pipeline">>, {array, Pipeline}}], 1, Options),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
@@ -517,7 +521,7 @@ drop_collection(PoolId, Collection, Options) when is_atom(PoolId) ->
 
 get_collections(PoolId) -> get_collections(PoolId, []).
 get_collections(PoolId, OptionsIn) ->
-  Options = set_slave_ok(OptionsIn),
+  Options = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   Query    = create_query(Options, []),
   Database = to_binary(get_database(Pool, undefined)),
@@ -542,7 +546,7 @@ get_collections(PoolId, OptionsIn) ->
 get_databases(PoolId) -> get_databases(PoolId, []).
 
 get_databases(PoolId, OptionsIn) ->
-  Options = set_slave_ok(OptionsIn),
+  Options = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
 
   TQuery   = create_query(Options, [{<<"listDatabases">>, 1}]),
@@ -653,7 +657,7 @@ drop_database(PoolId, Options) ->
 %--------------------------------------------------------------------
 init(_) ->
   process_flag(trap_exit, true),
-  ets:new(?COLL_DB_MAP_ETS, [public, named_table, {read_concurrency, true}]),
+  ets:new(?EMONGO_CONFIG, [public, named_table, {read_concurrency, true}]),
   Pools = initialize_pools(),
   {ok, HN} = inet:gethostname(),
   <<HashedHN:3/binary,_/binary>> = erlang:md5(HN),
@@ -847,7 +851,9 @@ do_auth(_Conn, #pool{user = undefined, pass_hash = undefined} = Pool) -> Pool;
 do_auth(Conn, #pool{auth_db = AuthDatabase} = Pool) when AuthDatabase =/= undefined ->
   do_auth([AuthDatabase], Conn, Pool);
 do_auth(Conn, Pool) ->
-  RegisteredDBs = [Pool#pool.database | [DB || [DB, AuthFlag] <- ets:match(?COLL_DB_MAP_ETS, {{Pool#pool.id, '_'}, '$1', '$2'}), AuthFlag =:= true]],
+  % Get all coll_to_db maps where AuthFlag is true
+  CollToDbs = [DB || [DB, true] <- ets:match(?EMONGO_CONFIG, {{coll_to_db, Pool#pool.id, '_'}, '$1', '$2'})],
+  RegisteredDBs = [Pool#pool.database | CollToDbs],
   UniqueDBs = lists:usort(RegisteredDBs),
   do_auth(UniqueDBs, Conn, Pool).
 
@@ -1006,14 +1012,15 @@ get_pool(PoolId, [Pool|Tail], Others) ->
   get_pool(PoolId, Tail, [Pool|Others]).
 
 get_database(Pool, Collection) ->
-  case ets:lookup(?COLL_DB_MAP_ETS, {Pool#pool.id, to_binary(Collection)}) of
+  case ets:lookup(?EMONGO_CONFIG, {coll_to_db, Pool#pool.id, to_binary(Collection)}) of
     [{_, Database, true}]  -> Database;
-    [{_, Database, false}] -> % If an auth db was given, assume that the user has roles to access all other dbs
-                              case Pool#pool.auth_db of 
-                                undefined -> throw({emongo_db_not_authenticated, Database});
-                                _         -> Database
-                              end;
-    _                      -> Pool#pool.database
+    [{_, Database, false}] ->
+      % If an auth db was given, assume that the user has roles to access all other dbs
+      case Pool#pool.auth_db of
+        undefined -> throw({emongo_db_not_authenticated, Database});
+        _         -> Database
+      end;
+    _ -> Pool#pool.database
   end.
 
 dec2hex(Dec) ->
@@ -1109,8 +1116,7 @@ transform_options([{Ignore, _} | Rest], EmoQuery)
   transform_options(Rest, EmoQuery);
 transform_options([Ignore | Rest], EmoQuery)
     when Ignore == check_match_found;
-         Ignore == response_options;
-         Ignore == ?USE_PRIMARY ->
+         Ignore == response_options ->
   transform_options(Rest, EmoQuery);
 transform_options([Invalid | _Rest], _EmoQuery) ->
   throw({emongo_invalid_option, Invalid}).
@@ -1310,10 +1316,13 @@ convert_fields([])                    -> [];
 convert_fields([{Field, Val} | Rest]) -> [{Field, Val} | convert_fields(Rest)];
 convert_fields([Field | Rest])        -> [{Field, 1}   | convert_fields(Rest)].
 
-set_slave_ok(Options) ->
-  case lists:member(?USE_PRIMARY, Options) of
-    true -> lists:delete(?USE_PRIMARY, Options);
-    _    -> [{<<"$readPreference">>, [{<<"mode">>, <<"secondaryPreferred">>}]}, ?SLAVE_OK | Options]
-  end.
+set_read_preference(PoolId, Options) ->
+  DefaultReadPref = ets:lookup_element(?EMONGO_CONFIG, {default_read_pref, PoolId}, 2),
+  ReadPref        = proplists:get_value(read_pref, Options, DefaultReadPref),
+  set_read_preference_int(to_binary(ReadPref), proplists:delete(read_pref, Options)).
+
+set_read_preference_int(undefined, Options) -> Options;
+set_read_preference_int(ReadPref,  Options) ->
+  [{<<"$readPreference">>, [{<<"mode">>, ReadPref}]} | Options].
 
 % c("../../deps/emongo/src/emongo.erl", [{i, "../../deps/emongo/include"}]).
