@@ -41,8 +41,9 @@ run_test_() ->
       fun test_empty_sel_with_orderby/0,
       fun test_count/0,
       fun test_find_one/0,
-      fun test_encoding_performance/0,
       fun test_read_preferences/0,
+      fun test_strip_selector/0,
+      fun test_encoding_performance/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -137,7 +138,7 @@ test_find_one() ->
   ?OUT("Test passed", []).
 
 test_read_preferences() ->
-  ?OUT("Test read preference", []),
+  ?OUT("Testing read preference", []),
   ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?SLAVE_OK])),
@@ -147,6 +148,53 @@ test_read_preferences() ->
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECD_PREF])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_NEAREST])),
   clear_coll(),
+  ?OUT("Test passed", []).
+
+test_strip_selector() ->
+  ?OUT("Testing strip selector", []),
+  ?assertEqual([{<<"a">>, undefined}],
+               emongo:strip_selector([{<<"a">>, 1}])),
+  ?assertEqual([{<<"a">>, undefined}, {<<"b">>, undefined}],
+               emongo:strip_selector([{<<"a">>, 1}, {<<"b">>, 1}])),
+  ?assertEqual([{<<"$or">>, {array, [[{<<"a">>, undefined}], [{<<"a">>, undefined}]]}}],
+               emongo:strip_selector([{<<"$or">>, {array, [[{<<"a">>, 1}], [{<<"a">>, 2}]]}}])),
+  ?assertEqual([{<<"markets">>, [{<<"$in">>, {array, [undefined, undefined]}}]}],
+               emongo:strip_selector([{<<"markets">>, [{<<"$in">>, {array, [<<"some thing">>, <<"ALL-MARKETS">>]}}]}])),
+  % This is a ridiculous selector we have in our system that I'm including just for fun:
+  Stripped1 = emongo:strip_selector([
+    {<<"a">>, 1},
+    {<<"$and">>, {array, [
+      [{<<"$or">>, {array, [
+        [{<<"status">>, undefined}],
+        [{<<"status">>, <<"active">>}]
+      ]}}],
+      [{<<"$or">>, {array, [
+        [{<<"start_date_time">>, undefined}],
+        [{<<"start_date_time">>, [{<<"$lte">>, 123}]}]
+      ]}}],
+      [{<<"$or">>, {array, [
+        [{<<"end_date_time">>, undefined}],
+        [{<<"end_date_time">>, [{<<"$gte">>, 123}]}]
+      ]}}]
+    ]}}
+  ]),
+  ExpectedRes1 = [
+    {<<"a">>, undefined},
+    {<<"$and">>, {array, [
+      [{<<"$or">>, {array, [
+        [{<<"status">>, undefined}],
+        [{<<"status">>, undefined}]
+      ]}}],
+      [{<<"$or">>, {array, [
+        [{<<"start_date_time">>, undefined}],
+        [{<<"start_date_time">>, [{<<"$lte">>, undefined}]}]
+      ]}}],
+      [{<<"$or">>, {array, [
+        [{<<"end_date_time">>, undefined}],
+        [{<<"end_date_time">>, [{<<"$gte">>, undefined}]}]
+      ]}}]
+    ]}}],
+  ?assertEqual(ExpectedRes1, Stripped1),
   ?OUT("Test passed", []).
 
 test_encoding_performance() ->

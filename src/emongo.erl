@@ -52,7 +52,8 @@
          total_db_time_usec/0, db_timing/0, clear_timing/0,
          dec2hex/1, hex2dec/1, utf8_encode/1,
          drop_collection/2, drop_collection/3,
-         drop_database/1, drop_database/2, get_databases/1, get_databases/2]).
+         drop_database/1, drop_database/2, get_databases/1, get_databases/2,
+         strip_selector/1]).
 
 -define(TIMING_KEY, emongo_timing).
 -define(MAX_TIMES,  10).
@@ -1177,6 +1178,28 @@ convert_value(_, [SubSel | _] = SubSels) when ?IS_DOCUMENT(SubSel) ->
 convert_value(_, {array, [SubSel | _] = SubSels}) when ?IS_DOCUMENT(SubSel) ->
   {array, [transform_selector(Sel) || Sel <- SubSels]};
 convert_value(_, Value) -> Value.
+
+% This function strips the input selector.  All values are replaced with 'undefined' while preserving the structure and
+% keys in the selector.  This is useful for tools that track queries to map them to indexes on the collection.
+strip_selector(Selector) ->
+  lists:map(fun({Key, Value}) ->
+    ConvKey = convert_key(Key),
+    ForceDataType = force_data_type(ConvKey),
+    ConvValue = strip_value(ForceDataType, Value),
+    {ConvKey, ConvValue}
+  end, Selector).
+
+strip_value(array, {array, Vals}) ->
+  {array, [strip_value(undefined, V) || V <- Vals]};
+strip_value(array, Vals) ->
+  strip_value(array, {array, Vals});
+strip_value(_, Sel) when ?IS_DOCUMENT(Sel) ->
+  strip_selector(Sel);
+strip_value(_, [SubSel | _] = SubSels) when ?IS_DOCUMENT(SubSel) ->
+  {array, [strip_selector(Sel) || Sel <- SubSels]};
+strip_value(_, {array, [SubSel | _] = SubSels}) when ?IS_DOCUMENT(SubSel) ->
+  {array, [strip_selector(Sel) || Sel <- SubSels]};
+strip_value(_, _Value) -> undefined.
 
 dec0($a) ->  10;
 dec0($b) ->  11;
