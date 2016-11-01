@@ -43,6 +43,7 @@ run_test_() ->
       fun test_find_one/0,
       fun test_encoding_performance/0,
       fun test_read_preferences/0,
+      fun test_bulk_insert/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -146,6 +147,35 @@ test_read_preferences() ->
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECONDARY])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECD_PREF])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_NEAREST])),
+  clear_coll(),
+  ?OUT("Test passed", []).
+
+test_bulk_insert() ->
+  ?OUT("Test bulk insert > 1000", []),
+  Count = 5000,
+
+  % Create an index used for creating writeErrors
+  emongo:create_index(?POOL, ?COLL, [{<<"index">>, 1}], [{<<"unique">>, true}]),
+
+  % Insert 5000 documents - emongo will break down into 5 calls
+  Docs = lists:map(fun(N) ->
+           ?SMALL_DOCUMENT(N, <<"bulk_insert">>)
+         end, lists:seq(1, Count)),
+
+  IRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options]),
+  #response{documents=[IResDoc]} = IRes,
+
+  % Check that ok and n values are aggregated
+  ?assertEqual(1, proplists:get_value(<<"ok">>, IResDoc)),
+  ?assertEqual(Count, proplists:get_value(<<"n">>, IResDoc)),
+
+  % Check that writeErrors are aggregated
+  IErrorRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options, {ordered, false}]),
+  #response{documents=[IErrorResDoc]} = IErrorRes,
+  {array, WriteErrors} = proplists:get_value(<<"writeErrors">>, IErrorResDoc),
+  ?assertEqual(Count, length(WriteErrors)),
+
+  emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
   clear_coll(),
   ?OUT("Test passed", []).
 

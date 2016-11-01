@@ -272,9 +272,18 @@ Find only the first matching document.
 	emongo:find_one(PoolId, Collection, Selector) -> Result
 	emongo:find_one(PoolId, Collection, Selector, Options) -> Result
 
-## Ensure Index
+## Ensure Index (deprecated)
 
 	emongo:ensure_index(PoolId, Collection, Keys, Unique) -> ok
+
+## Create Index (mongodb 2.6 or later)
+
+	emongo:create_index(PoolId, Collection, Keys, Options) -> ok
+	emongo:create_index(PoolId, Collection, Keys, IndexName, Options) -> ok
+
+## Drop Index
+
+	emongo:drop_index(PoolId, Collection, IndexName) -> ok
 
 ## Count
 
