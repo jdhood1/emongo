@@ -43,6 +43,7 @@ run_test_() ->
       fun test_find_one/0,
       fun test_encoding_performance/0,
       fun test_read_preferences/0,
+      fun test_duplicate_key_error/0,
       fun test_bulk_insert/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
@@ -148,6 +149,18 @@ test_read_preferences() ->
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECD_PREF])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_NEAREST])),
   clear_coll(),
+  ?OUT("Test passed", []).
+
+test_duplicate_key_error() ->
+  ?OUT("Test duplicate key error", []),
+  emongo:create_index(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"unique">>, true}]),
+  emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}]]),
+  ?assertThrow({emongo_error, duplicate_key, _},
+    emongo:find_and_modify(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}], [{new, true}])),
+  ?assertThrow({emongo_error, duplicate_key, _},
+    emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}])),
+  clear_coll(),
+  emongo:drop_index(?POOL, ?COLL, <<"a_1">>),
   ?OUT("Test passed", []).
 
 test_bulk_insert() ->

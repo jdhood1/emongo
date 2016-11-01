@@ -650,7 +650,16 @@ find_and_modify(PoolId, Collection, Selector, Update, Options)
   Resp         = send_recv_command(find_and_modify, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> Resp#response.documents
+    false ->
+    % TODO - throw error (specific error or a generic emongo_error) if errmsg is returned,
+    % else return the documents. To do this we will need to make sure any application using
+    % find_and_modify is able to handle the errors.
+      #response{documents=[Res]} = Resp,
+      case proplists:get_value(<<"errmsg">>, Res) of
+        undefined     -> ok;
+        ErrorMsg      -> throw_specific_errors(ErrorMsg, Res)
+      end,
+      Resp#response.documents
   end.
 
 %====================================================================
@@ -1398,16 +1407,10 @@ send_command(Command, Collection, Selector, Options, Conn, Pool, Packet) ->
 
 get_sync_result_old_proto(#response{documents = [Doc]}, CheckMatchFound) ->
   case proplists:get_value(<<"err">>, Doc, undefined) of
-    undefined -> check_match_found(Doc, CheckMatchFound);
-    ErrorMsg  ->
-      Code = proplists:get_value(<<"code">>, Doc),
-      if Code == 11000 orelse Code == 11001 -> throw({emongo_error, duplicate_key, ErrorMsg});
-         true -> ok
-      end,
-      case ErrorMsg of
-        <<"timeout">> -> throw({emongo_conn_error, db_timeout});
-        _             -> throw({emongo_error, ErrorMsg})
-      end
+    undefined     -> check_match_found(Doc, CheckMatchFound);
+    <<"timeout">> -> throw({emongo_conn_error, db_timeout});
+    ErrorMsg      -> throw_specific_errors(ErrorMsg, Doc),
+                     throw({emongo_error, ErrorMsg})
   end;
 get_sync_result_old_proto(Resp, _CheckMatchFound) ->
   throw({emongo_error, {invalid_response, Resp}}).
@@ -1416,14 +1419,26 @@ get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) 
   % Throw an exception if there were write errors returned
   case proplists:get_value(<<"writeErrors">>, Doc, undefined) of
     undefined -> ok;
-    {array, ErrorList} -> duplicate_key_check(ErrorList),
-                          throw({emongo_error, ErrorList})
+    {array, ErrorList} ->
+      lists:foreach(fun(Error) ->
+        ErrorMsg = proplists:get_value(<<"errmsg">>, Doc, undefined),
+        throw_specific_errors(ErrorMsg, Error)
+      end, ErrorList),
+      throw({emongo_error, ErrorList});
+    _ -> ok
   end,
 
   % Throw an exception if there were write concern errors returned
   case proplists:get_value(<<"writeConcernError">>, Doc, undefined) of
     undefined -> ok;
     Error     -> throw({emongo_error, Error})
+  end,
+
+  % In some cases, error can be under <<"errmsg">> as well
+  case proplists:get_value(<<"errmsg">>, Doc, undefined) of
+    undefined     -> ok;
+    ErrorMsg      -> throw_specific_errors(ErrorMsg, Doc),
+                     throw({emongo_error, ErrorMsg})
   end,
 
   % Check the value of the ok
@@ -1450,14 +1465,12 @@ check_match_found(Doc, _) ->
       end
   end.
 
-duplicate_key_check([]) -> ok;
-duplicate_key_check([Doc | Rest]) ->
+throw_specific_errors(ErrorMsg, Doc) ->
   Code = proplists:get_value(<<"code">>, Doc),
-  if Code == 11000 orelse Code == 11001 ->
-       ErrorMsg = proplists:get_value(<<"errmsg">>, Doc, undefined),
-       throw({emongo_error, duplicate_key, ErrorMsg});
-     true ->
-       duplicate_key_check(Rest)
+  if
+    Code == 11000 orelse Code == 11001 -> throw({emongo_error, duplicate_key, ErrorMsg});
+    Code == 13                         -> throw({emongo_authorization_error, ErrorMsg});
+    true                               -> ok
   end.
 
 time_call({Command, Collection, Selector, _Options}, Fun) ->
