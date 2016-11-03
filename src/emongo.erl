@@ -1421,7 +1421,7 @@ get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) 
     undefined -> ok;
     {array, ErrorList} ->
       lists:foreach(fun(Error) ->
-        ErrorMsg = proplists:get_value(<<"errmsg">>, Doc, undefined),
+        ErrorMsg = proplists:get_value(<<"errmsg">>, Error, undefined),
         throw_specific_errors(ErrorMsg, Error)
       end, ErrorList),
       throw({emongo_error, ErrorList});
