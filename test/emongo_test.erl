@@ -44,6 +44,8 @@ run_test_() ->
       fun test_read_preferences/0,
       fun test_strip_selector/0,
       fun test_encoding_performance/0,
+      fun test_duplicate_key_error/0,
+      fun test_bulk_insert/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -197,6 +199,47 @@ test_strip_selector() ->
   ?assertEqual(ExpectedRes1, Stripped1),
   ?OUT("Test passed", []).
 
+test_duplicate_key_error() ->
+  ?OUT("Test duplicate key error", []),
+  emongo:create_index(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"unique">>, true}]),
+  emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}]]),
+  ?assertThrow({emongo_error, duplicate_key, _},
+    emongo:find_and_modify(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}], [{new, true}])),
+  ?assertThrow({emongo_error, duplicate_key, _},
+    emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}])),
+  clear_coll(),
+  emongo:drop_index(?POOL, ?COLL, <<"a_1">>),
+  ?OUT("Test passed", []).
+
+test_bulk_insert() ->
+  ?OUT("Test bulk insert > 1000", []),
+  Count = 5000,
+
+  % Create an index used for creating writeErrors
+  emongo:create_index(?POOL, ?COLL, [{<<"index">>, 1}], [{<<"unique">>, true}]),
+
+  % Insert 5000 documents - emongo will break down into 5 calls
+  Docs = lists:map(fun(N) ->
+           ?SMALL_DOCUMENT(N, <<"bulk_insert">>)
+         end, lists:seq(1, Count)),
+
+  IRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options]),
+  #response{documents=[IResDoc]} = IRes,
+
+  % Check that ok and n values are aggregated
+  ?assertEqual(1, proplists:get_value(<<"ok">>, IResDoc)),
+  ?assertEqual(Count, proplists:get_value(<<"n">>, IResDoc)),
+
+  % Check that writeErrors are aggregated
+  IErrorRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options, {ordered, false}]),
+  #response{documents=[IErrorResDoc]} = IErrorRes,
+  {array, WriteErrors} = proplists:get_value(<<"writeErrors">>, IErrorResDoc),
+  ?assertEqual(Count, length(WriteErrors)),
+
+  emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
+  clear_coll(),
+  ?OUT("Test passed", []).
+
 test_encoding_performance() ->
   ?OUT("Testing encoding performance", []),
   {EncodeTime, ok} = timer:tc(fun() ->
@@ -240,7 +283,7 @@ run_single_test(X, Y) ->
   Selector = [{<<"_id">>, Num}],
   try
     IRes = emongo:insert_sync(?POOL, ?COLL, Selector, [response_options]),
-    ok = check_result("insert_sync", IRes, 0),
+    ok = check_result(insert_sync, IRes, 0),
 
     [FMRes] = emongo:find_and_modify(?POOL, ?COLL, Selector,
       [{<<"$set">>, [{<<"fm">>, Num}]}], [{new, true}]),
@@ -249,13 +292,13 @@ run_single_test(X, Y) ->
 
     URes = emongo:update_sync(?POOL, ?COLL, Selector,
       [{<<"$set">>, [{<<"us">>, Num}]}], false, [response_options]),
-    ok = check_result("update_sync", URes, 1),
+    ok = check_result(update_sync, URes, 1),
 
     FARes = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
     ?assertEqual([Selector ++ [{<<"fm">>, Num}, {<<"us">>, Num}]], FARes),
 
     DRes = emongo:delete_sync(?POOL, ?COLL, Selector, [response_options]),
-    ok = check_result("delete_sync", DRes, 1)
+    ok = check_result(delete_sync, DRes, 1)
   catch _:E ->
     ?OUT("Exception occurred for test ~.16b: ~p\n~p\n",
               [Num, E, erlang:get_stacktrace()]),
@@ -265,12 +308,15 @@ run_single_test(X, Y) ->
 check_result(Desc,
              {response, _,_,_,_,_, [List]},
              ExpectedN) when is_list(List) ->
-  {_, Err} = lists:keyfind(<<"err">>, 1, List),
-  {_, N}   = lists:keyfind(<<"n">>,   1, List),
+  Ok  = proplists:get_value(<<"ok">>, List),
+  Err = proplists:get_value(<<"err">>, List),
+  N   = proplists:get_value(<<"n">>, List),
   if Err == undefined, N == ExpectedN -> ok;
-  true ->
-    ?OUT("Unexpected result for ~p: Err = ~p; N = ~p", [Desc, Err, N]),
-    throw({error, invalid_db_response})
+     Ok == 1, Err == undefined, Desc == insert_sync, N == 1 -> ok;
+     Ok == 1, Err == undefined, N == ExpectedN -> ok;
+     true ->
+       ?OUT("Unexpected result for ~p: Ok = ~p; Err = ~p; N = ~p", [Desc, Ok, Err, N]),
+       throw({error, invalid_db_response})
   end.
 
 block_until_done(Ref) ->

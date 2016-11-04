@@ -44,7 +44,7 @@
          delete/2, delete/3, delete/4,
          delete_sync/2, delete_sync/3, delete_sync/4,
          distinct/3, distinct/4, distinct/5,
-         ensure_index/4,
+         ensure_index/4, create_index/4, create_index/5, drop_index/3,
          aggregate/3, aggregate/4,
          get_collections/1, get_collections/2,
          run_command/3, run_command/2,
@@ -59,6 +59,9 @@
 -define(MAX_TIMES,  10).
 -define(EMONGO_CONFIG, emongo_config).
 -define(SHA1_DIGEST_LEN, 20).
+-define(WRITE_CMD_LIMIT, 1000).
+-define(IS_MONGO_2_6(MaxWireVersion), (MaxWireVersion >= 3)).
+-define(IS_MONGO_3_2(MaxWireVersion), (MaxWireVersion >= 4)).
 
 -record(state, {pools, oid_index, hashed_hostn}).
 
@@ -102,22 +105,24 @@ add_pool(PoolId, Host, Port, DefaultDatabase, Size) ->
 
 % Options = [option()]
 % option() =
-%   {timeout,            integer()} % milliseconds
-%   {user,               string()}
-%   {password,           string()}
+%   {timeout,             integer()} % milliseconds
+%   {auth_db,             string()}
+%   {user,                string()}
+%   {password,            string()}
 %   % max_pipeline_depth is the maximum number of messages that are waiting for a response from the DB that can be sent
 %   % across a socket before receiving a reply.  For example, if max_pipeline_depth is 1, only one message that requires
 %   % a response will be sent across a given socket in the pool to the DB before a reply to that request is received.
 %   % Other requests will wait in the queue.  Messages that do not require a response can still be sent on that socket.
 %   % 0 means there is no limit.  This is equivalent to HTTP pipelining, except in the communication with the DB.
-%   {max_pipeline_depth, int()}
-%   {socket_options,     [gen_tcp:connect_option()]} % http://www.erlang.org/doc/man/gen_tcp.html#type-connect_option
-%   {write_concern,      int()}
+%   {max_pipeline_depth,  int()}
+%   {socket_options,      [gen_tcp:connect_option()]} % http://www.erlang.org/doc/man/gen_tcp.html#type-connect_option
+%   {write_concern,       int()}
 %   {write_concern_timeout, integer()} % milliseconds
+%   {journal_write_ack,   boolean()}
 %   % disconnect_timeouts is the number of consecutive timeouts allowed on a socket before the socket is disconnected
 %   % and reconnect.  0 means even the first timeout will cause a disconnect and reconnect.
 %   {disconnect_timeouts, int()}
-%   {default_read_pref, string()} % https://docs.mongodb.com/manual/core/read-preference/
+%   {default_read_pref,   string()} % https://docs.mongodb.com/manual/core/read-preference/
 %      primary, primaryPreferred, secondary, secondaryPreferred, nearest
 
 add_pool(PoolId, Host, Port, DefaultDatabase, Size, Options) ->
@@ -285,7 +290,11 @@ insert(PoolId, Collection, DocumentsIn) ->
 
 %------------------------------------------------------------------------------
 % insert_sync that runs db.$cmd.findOne({getlasterror: 1});
-% Options can include {write_concern, (string|integer)}, {write_concern_timeout, Milliseconds}
+% Options can include:
+%   {write_concern, string() | integer()}
+%   {write_concern_timeout, integer()} (timeout in milliseconds)
+%   {journal_write_ack, boolean()} (version 2.6 or later)
+%   {ordered, boolean()} (version 2.6 or later)
 %------------------------------------------------------------------------------
 insert_sync(PoolId, Collection, Documents) ->
   insert_sync(PoolId, Collection, Documents, []).
@@ -296,9 +305,39 @@ insert_sync(PoolId, Collection, DocumentsIn, Options) ->
     ?IS_DOCUMENT(DocumentsIn)          -> [DocumentsIn]
   end,
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  Packet1 = emongo_packet:insert(get_database(Pool, Collection), Collection,
-                                 Pool#pool.req_id, Documents),
-  sync_command(insert_sync, Collection, undefined, Options, Conn, Pool, Packet1).
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
+       {Head, Tail} = next_bulk_page(Documents),
+       Resp = insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, undefined),
+       case lists:member(response_options, Options) of
+         true  -> Resp;
+         false -> get_sync_result_new_proto(Resp, false)
+       end;
+     true ->
+       Packet  = emongo_packet:insert(get_database(Pool, Collection), Collection,
+                                      Pool#pool.req_id, Documents),
+       sync_command(insert_sync, Collection, undefined, Options, Conn, Pool, Packet)
+  end.
+
+insert_sync_page(_, _, _, [], _, _, AccResp) ->
+  AccResp;
+insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, AccResp) ->
+  Ordered    = proplists:get_value(ordered, Options, true),
+  InsertDoc  = [{<<"documents">>, {array, Head}},
+                get_ordered_option(Ordered),
+                get_writeconcern_option(Options, Pool)],
+  Query      = create_cmd(<<"insert">>, Collection, InsertDoc, -1, Options),
+  Packet     = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+  Resp       = send_recv_command(insert_sync, Collection, undefined, Options, Conn, Pool, Packet),
+  NewAccResp = merge_response_docs(AccResp, Resp),
+
+  % Break out early if the request is ordered and a write error occurred
+  case Ordered andalso proplists:is_defined(<<"writeErrors">>, hd(Resp#response.documents)) of
+    true ->
+      NewAccResp;
+    false ->
+      {NewHead, NewTail} = next_bulk_page(Tail),
+      insert_sync_page(Conn, Pool, Collection, NewHead, NewTail, Options, NewAccResp)
+  end.
 
 %------------------------------------------------------------------------------
 % update
@@ -338,7 +377,11 @@ update_all(PoolId, Collection, Selector, Document, Options)
 % update_sync that runs db.$cmd.findOne({getlasterror: 1});
 % If no documents match the input Selector, {emongo_no_match_found, DbResponse}
 % will be returned.
-% Options can include {write_concern, (string|integer)}, {write_concern_timeout, Milliseconds}
+% Options can include:
+%   {write_concern, string() | integer()}
+%   {write_concern_timeout, integer()} (timeout in milliseconds)
+%   {journal_write_ack, boolean()} (version 2.6 or later)
+%   {ordered, boolean()} (version 2.6 or later)
 %------------------------------------------------------------------------------
 update_sync(PoolId, Collection, Selector, Document)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
@@ -351,19 +394,38 @@ update_sync(PoolId, Collection, Selector, Document, Upsert)
 update_sync(PoolId, Collection, Selector, Document, Upsert, Options)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  Query = create_query(Options, Selector),
-  Packet1 = emongo_packet:update(get_database(Pool, Collection), Collection,
-                                 Pool#pool.req_id, Upsert, false, Query#emo_query.q,
-                                 Document),
   Options1 = case Upsert of
     true -> Options;
     _    -> [check_match_found | Options]
   end,
-  sync_command(update_sync, Collection, Selector, Options1, Conn, Pool, Packet1).
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
+       UpdateDoc = [{<<"updates">>, [[{<<"q">>,      {struct, transform_selector(Selector)}},
+                                      {<<"u">>,      {struct, Document}},
+                                      {<<"upsert">>, Upsert}]]},
+                    get_ordered_option(Options),
+                    get_writeconcern_option(Options, Pool)],
+       Query   = create_cmd(<<"update">>, Collection, UpdateDoc, -1, Options),
+       Packet  = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+       Resp    = send_recv_command(update_sync, Collection, Selector, Options, Conn, Pool, Packet),
+       case lists:member(response_options, Options) of
+         true  -> Resp;
+         false -> get_sync_result_new_proto(Resp, not Upsert)
+       end;
+     true ->
+       Query = create_query(Options, Selector),
+       Packet1 = emongo_packet:update(get_database(Pool, Collection), Collection,
+                                      Pool#pool.req_id, Upsert, false, Query#emo_query.q,
+                                      Document),
+       sync_command(update_sync, Collection, Selector, Options1, Conn, Pool, Packet1)
+  end.
 
 %------------------------------------------------------------------------------
 % update_all_sync that runs db.$cmd.findOne({getlasterror: 1});
-% Options can include {write_concern, (string|integer)}, {write_concern_timeout, Milliseconds}
+% Options can include:
+%   {write_concern, string() | integer()}
+%   {write_concern_timeout, integer()} (timeout in milliseconds)
+%   {journal_write_ack, boolean()} (version 2.6 or later)
+%   {ordered, boolean()} (version 2.6 or later)
 %------------------------------------------------------------------------------
 update_all_sync(PoolId, Collection, Selector, Document)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
@@ -372,14 +434,28 @@ update_all_sync(PoolId, Collection, Selector, Document)
 update_all_sync(PoolId, Collection, Selector, Document, Options)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  Query = create_query(Options, Selector),
-  Packet1 = emongo_packet:update(get_database(Pool, Collection), Collection,
-                                 Pool#pool.req_id, false, true, Query#emo_query.q,
-                                 Document),
-  % We could check <<"n">> as the update_sync(...) functions do, but
-  % update_all_sync(...) isn't targeting a specific number of documents, so 0
-  % updates is legitimate.
-  sync_command(update_all_sync, Collection, Selector, Options, Conn, Pool, Packet1).
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
+       UpdateDoc = [{<<"updates">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
+                                      {<<"u">>,     {struct, Document}},
+                                      {<<"multi">>, true}]]},
+                    get_ordered_option(Options),
+                    get_writeconcern_option(Options, Pool)],
+       Query   = create_cmd(<<"update">>, Collection, UpdateDoc, -1, Options),
+       Packet  = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+       Resp    = send_recv_command(update_all_sync, Collection, Selector, Options, Conn, Pool, Packet),
+       case lists:member(response_options, Options) of
+         true  -> Resp;
+         false -> get_sync_result_new_proto(Resp, false)
+       end;
+     true ->
+       Query = create_query(Options, Selector),
+       Packet1 = emongo_packet:update(get_database(Pool, Collection), Collection,
+                                      Pool#pool.req_id, false, true, Query#emo_query.q,
+                                      Document),
+       % We could check <<"n">> as the update_sync(...) functions do, but update_all_sync(...)
+       % isn't targeting a specific number of documents, so 0 updates is legitimate.
+       sync_command(update_all_sync, Collection, Selector, Options, Conn, Pool, Packet1)
+  end.
 
 %------------------------------------------------------------------------------
 % delete
@@ -401,7 +477,11 @@ delete(PoolId, Collection, Selector, Options) ->
 % delete_sync that runs db.$cmd.findOne({getlasterror: 1});
 % If no documents match the input Selector, {emongo_no_match_found, DbResponse}
 % will be returned.
-% Options can include {write_concern, (string|integer)}, {write_concern_timeout, Milliseconds}
+% Options can include:
+%   {write_concern, string() | integer()}
+%   {write_concern_timeout, integer()} (timeout in milliseconds)
+%   {journal_write_ack, boolean()} (version 2.6 or later)
+%   {ordered, boolean()} (version 2.6 or later)
 %------------------------------------------------------------------------------
 delete_sync(PoolId, Collection) ->
   delete_sync(PoolId, Collection, []).
@@ -411,20 +491,85 @@ delete_sync(PoolId, Collection, Selector) ->
 
 delete_sync(PoolId, Collection, Selector, Options) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  Query = create_query(Options, Selector),
-  Packet1 = emongo_packet:delete(get_database(Pool, Collection), Collection,
-                                 Pool#pool.req_id,
-                                 Query#emo_query.q),
-  sync_command(delete_sync, Collection, Selector, [check_match_found | Options], Conn, Pool, Packet1).
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
+       DeleteDoc = [{<<"deletes">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
+                                      {<<"limit">>, 0}]]},
+                    get_ordered_option(Options),
+                    get_writeconcern_option(Options, Pool)],
+       Query   = create_cmd(<<"delete">>, Collection, DeleteDoc, -1, Options),
+       Packet  = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+       Resp    = send_recv_command(delete_sync, Collection, Selector, Options, Conn, Pool, Packet),
+       case lists:member(response_options, Options) of
+         true  -> Resp;
+         false -> get_sync_result_new_proto(Resp, true)
+       end;
+     true ->
+       Query = create_query(Options, Selector),
+       Packet1 = emongo_packet:delete(get_database(Pool, Collection), Collection,
+                                      Pool#pool.req_id,
+                                      Query#emo_query.q),
+       sync_command(delete_sync, Collection, Selector, [check_match_found | Options], Conn, Pool, Packet1)
+  end.
 
 %------------------------------------------------------------------------------
-% ensure index
+% ensure index (deprecated, use create_index instead)
 %------------------------------------------------------------------------------
 ensure_index(PoolId, Collection, Keys, Unique) when ?IS_DOCUMENT(Keys)->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Packet = emongo_packet:ensure_index(get_database(Pool, Collection), Collection,
-                                      Pool#pool.req_id, Keys, Unique),
-  send_command(ensure_index, Collection, Keys, [], Conn, Pool, Packet).
+  % If mongo 2.6 or newer, use create_index instead
+  if ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
+       Options = case Unique of
+         true -> [{<<"unique">>, true}];
+         _    -> []
+       end,
+       create_index(Conn, Pool, Collection, Keys, undefined, Options);
+     true ->
+       Packet = emongo_packet:ensure_index(get_database(Pool, Collection), Collection,
+                                           Pool#pool.req_id, Keys, Unique),
+       send_command(ensure_index, Collection, Keys, [], Conn, Pool, Packet)
+  end.
+
+%------------------------------------------------------------------------------
+% create index
+%------------------------------------------------------------------------------
+create_index(PoolId, Collection, Keys, Options) when ?IS_DOCUMENT(Keys)  ->
+  create_index(PoolId, Collection, Keys, undefined, Options).
+
+create_index(PoolId, Collection, Keys, IndexName, Options) when ?IS_DOCUMENT(Keys) ->
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
+  create_index(Conn, Pool, Collection, Keys, IndexName, Options).
+
+create_index(Conn, Pool, Collection, Keys, IndexName, Options) ->
+  Name = case IndexName of
+    undefined -> generate_index_name(Keys, <<>>);
+    _         -> IndexName
+  end,
+  Index        = [{<<"key">>, Keys}, {<<"name">>, Name}] ++ Options,
+  CreateIdxDoc = [{<<"indexes">>, {array, [Index]}}],
+  Query        = create_cmd(<<"createIndexes">>, Collection, CreateIdxDoc, -1, []),
+  Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+  Resp         = send_recv_command(create_index, Collection, undefined, [], Conn, Pool, Packet),
+  get_sync_result_new_proto(Resp, false).
+
+generate_index_name([], AccName) ->
+  AccName;
+generate_index_name([{Key, Value} | Rest], <<>>) ->
+  ValueBin = integer_to_binary(Value),
+  generate_index_name(Rest, << Key/binary, "_", ValueBin/binary >>);
+generate_index_name([{Key, Value} | Rest], AccName) ->
+  ValueBin = integer_to_binary(Value),
+  generate_index_name(Rest, << AccName/binary, "_", Key/binary, "_", ValueBin/binary >>).
+
+%------------------------------------------------------------------------------
+% drop index
+%------------------------------------------------------------------------------
+drop_index(PoolId, Collection, IndexName) ->
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
+  DropIdxDoc   = [{<<"index">>, IndexName}],
+  Query        = create_cmd(<<"dropIndexes">>, Collection, DropIdxDoc, -1, []),
+  Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+  Resp         = send_recv_command(drop_index, Collection, undefined, [], Conn, Pool, Packet),
+  get_sync_result_new_proto(Resp, false).
 
 %------------------------------------------------------------------------------
 % count
@@ -438,7 +583,8 @@ count(PoolId, Collection, Selector) ->
 count(PoolId, Collection, Selector, OptionsIn) ->
   Options      = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Query        = create_cmd(<<"count">>, Collection, Selector, [], 1, Options),
+  CountDoc     = [{<<"query">>, {struct, transform_selector(Selector)}}],
+  Query        = create_cmd(<<"count">>, Collection, CountDoc, 1, Options),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(count, Collection, Selector, Options, Conn, Pool, Packet),
   RespOpts     = lists:member(response_options, Options),
@@ -461,7 +607,8 @@ aggregate(PoolId, Collection, Pipeline) ->
 aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
   Options      = set_read_preference(PoolId, OptionsIn),
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Query        = create_cmd(<<"aggregate">>, Collection, undefined, [{<<"pipeline">>, {array, Pipeline}}], 1, Options),
+  AggregateDoc = [{<<"pipeline">>, {array, Pipeline}}],
+  Query        = create_cmd(<<"aggregate">>, Collection, AggregateDoc, 1, Options),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(aggregate, Collection, Pipeline, Options, Conn, Pool, Packet),
   RespOpts     = lists:member(response_options, Options),
@@ -478,6 +625,11 @@ aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
 
 %%------------------------------------------------------------------------------
 %% find_and_modify
+% Options can include:
+%   {timeout, integer()} (timeout in milliseconds)
+%   {write_concern, string() | integer()} (version 3.2 or later)
+%   {write_concern_timeout, integer()} (timeout in milliseconds) (version 3.2 or later)
+%   {journal_write_ack, boolean()} (version 3.2 or later)
 %%------------------------------------------------------------------------------
 find_and_modify(PoolId, Collection, Selector, Update) ->
   find_and_modify(PoolId, Collection, Selector, Update, []).
@@ -485,14 +637,30 @@ find_and_modify(PoolId, Collection, Selector, Update) ->
 find_and_modify(PoolId, Collection, Selector, Update, Options)
   when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Update), is_list(Options) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Query        = create_cmd(<<"findandmodify">>, Collection, Selector, [{<<"update">>, Update}], undefined,
+  Timeout      = get_timeout(Options, Pool),
+  FindModDoc   = [{<<"query">>, {struct, transform_selector(Selector)}},
+                  {<<"update">>, Update},
+                  {<<"maxTimeMS">>, Timeout}],
+  WriteConcern = if ?IS_MONGO_3_2(Pool#pool.max_wire_version) -> [get_writeconcern_option(Options, Pool)];
+                    true -> []
+                 end,
+  Query        = create_cmd(<<"findandmodify">>, Collection, FindModDoc ++ WriteConcern, undefined,
                             % We don't want to force the limit to 1, but want to default it to 1 if it's not in Options.
                             [{limit, 1} | Options]),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(find_and_modify, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> Resp#response.documents
+    false ->
+    % TODO - throw error (specific error or a generic emongo_error) if errmsg is returned,
+    % else return the documents. To do this we will need to make sure any application using
+    % find_and_modify is able to handle the errors.
+      #response{documents=[Res]} = Resp,
+      case proplists:get_value(<<"errmsg">>, Res) of
+        undefined     -> ok;
+        ErrorMsg      -> throw_specific_errors(ErrorMsg, Res)
+      end,
+      Resp#response.documents
   end.
 
 %====================================================================
@@ -859,7 +1027,7 @@ do_auth(Conn, Pool) ->
   do_auth(UniqueDBs, Conn, Pool).
 
 do_auth([], _Conn, Pool) -> Pool;
-do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) when Pool#pool.max_wire_version >= 3 ->
+do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) when ?IS_MONGO_2_6(Pool#pool.max_wire_version) ->
   Bytes = crypto:rand_bytes(6),
   ClientNonce = base64:encode(emongo:dec2hex(Bytes)),
 
@@ -1057,17 +1225,13 @@ utf8_encode(Value) ->
   end
   end.
 
-% create_cmd(Command, Collection, Selector, ExtraParams, ForcedLimit, Options)
-create_cmd(Command, Collection, undefined, ExtraParams, undefined, Options) ->
+% create_cmd(Command, Collection, ExtraParams, ForcedLimit, Options)
+create_cmd(Command, Collection, ExtraParams, undefined, Options) ->
   EmoQuery = transform_options(Options, #emo_query{}),
   EmoQuery#emo_query{q = [{Command, Collection} | ExtraParams ++ EmoQuery#emo_query.q]};
-create_cmd(Command, Collection, Selector, ExtraParams, undefined, Options) ->
-  % For some reason, with this version of MongoDB, they use "query" with "$cmd" and "$query" for other selectors.
-  NewExtraParams = [{<<"query">>, {struct, transform_selector(Selector)}} | ExtraParams],
-  create_cmd(Command, Collection, undefined, NewExtraParams, undefined, Options);
-create_cmd(Command, Collection, Selector, ExtraParams, ForcedLimit, Options) ->
+create_cmd(Command, Collection, ExtraParams, ForcedLimit, Options) ->
   NewOptions = [{limit, ForcedLimit} | proplists:delete(limit, Options)],
-  create_cmd(Command, Collection, Selector, ExtraParams, undefined, NewOptions).
+  create_cmd(Command, Collection, ExtraParams, undefined, NewOptions).
 
 create_query(Options, SelectorIn) ->
   Selector = transform_selector(SelectorIn),
@@ -1113,7 +1277,9 @@ transform_options([{Ignore, _} | Rest], EmoQuery)
     when Ignore == timeout;
          % The write-concern options are handled in sync_command()
          Ignore == write_concern;
-         Ignore == write_concern_timeout ->
+         Ignore == write_concern_timeout;
+         Ignore == journal_write_ack;
+         Ignore == ordered ->
   transform_options(Rest, EmoQuery);
 transform_options([Ignore | Rest], EmoQuery)
     when Ignore == check_match_found;
@@ -1123,7 +1289,8 @@ transform_options([Invalid | _Rest], _EmoQuery) ->
   throw({emongo_invalid_option, Invalid}).
 
 transform_selector(Selector) ->
-  lists:map(fun({Key, Value}) ->
+  lists:map(fun(undefined)    -> undefined;
+               ({Key, Value}) ->
     ConvKey = convert_key(Key),
     ForceDataType = force_data_type(ConvKey),
     ConvValue = convert_value(ForceDataType, Value),
@@ -1232,7 +1399,7 @@ sync_command(Command, Collection, Selector, Options, Conn, Pool, Packet1) ->
     end),
     case lists:member(response_options, Options) of
       true  -> Resp;
-      false -> get_sync_result(Resp, lists:member(check_match_found, Options))
+      false -> get_sync_result_old_proto(Resp, lists:member(check_match_found, Options))
     end
   catch _:{emongo_conn_error, Error} ->
     throw({emongo_conn_error, Error, Command, Collection, Selector,
@@ -1261,21 +1428,49 @@ send_command(Command, Collection, Selector, Options, Conn, Pool, Packet) ->
 
 % TODO: Include selector in emongo_error messages.
 
-get_sync_result(#response{documents = [Doc]}, CheckMatchFound) ->
+get_sync_result_old_proto(#response{documents = [Doc]}, CheckMatchFound) ->
   case proplists:get_value(<<"err">>, Doc, undefined) of
-    undefined -> check_match_found(Doc, CheckMatchFound);
-    ErrorMsg  ->
-      case proplists:get_value(<<"code">>, Doc) of
-        11000 -> throw({emongo_error, duplicate_key, ErrorMsg});
-        11001 -> throw({emongo_error, duplicate_key, ErrorMsg});
-        _     -> ok
-      end,
-      case ErrorMsg of
-        <<"timeout">> -> throw({emongo_conn_error, db_timeout});
-        _             -> throw({emongo_error, ErrorMsg})
-      end
+    undefined     -> check_match_found(Doc, CheckMatchFound);
+    <<"timeout">> -> throw({emongo_conn_error, db_timeout});
+    ErrorMsg      -> throw_specific_errors(ErrorMsg, Doc),
+                     throw({emongo_error, ErrorMsg})
   end;
-get_sync_result(Resp, _CheckMatchFound) ->
+get_sync_result_old_proto(Resp, _CheckMatchFound) ->
+  throw({emongo_error, {invalid_response, Resp}}).
+
+get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) ->
+  % Throw an exception if there were write errors returned
+  case proplists:get_value(<<"writeErrors">>, Doc, undefined) of
+    undefined -> ok;
+    {array, ErrorList} ->
+      lists:foreach(fun(Error) ->
+        ErrorMsg = proplists:get_value(<<"errmsg">>, Doc, undefined),
+        throw_specific_errors(ErrorMsg, Error)
+      end, ErrorList),
+      throw({emongo_error, ErrorList});
+    _ -> ok
+  end,
+
+  % Throw an exception if there were write concern errors returned
+  case proplists:get_value(<<"writeConcernError">>, Doc, undefined) of
+    undefined -> ok;
+    Error     -> throw({emongo_error, Error})
+  end,
+
+  % In some cases, error can be under <<"errmsg">> as well
+  case proplists:get_value(<<"errmsg">>, Doc, undefined) of
+    undefined     -> ok;
+    ErrorMsg      -> throw_specific_errors(ErrorMsg, Doc),
+                     throw({emongo_error, ErrorMsg})
+  end,
+
+  % Check the value of the ok
+  case {proplists:get_value(<<"ok">>, Doc, undefined), CheckMatchFound} of
+    {undefined, _} -> throw({emongo_error, {invalid_response, Resp}});
+    {0, true}      -> {emongo_no_match_found, Doc};
+    _              -> ok
+  end;
+get_sync_result_new_proto(Resp, _CheckMatchFound) ->
   throw({emongo_error, {invalid_response, Resp}}).
 
 check_match_found(_Doc, false) -> ok;
@@ -1291,6 +1486,14 @@ check_match_found(Doc, _) ->
         0         -> {emongo_no_match_found, Doc};
         _         -> ok
       end
+  end.
+
+throw_specific_errors(ErrorMsg, Doc) ->
+  Code = proplists:get_value(<<"code">>, Doc),
+  if
+    Code == 11000 orelse Code == 11001 -> throw({emongo_error, duplicate_key, ErrorMsg});
+    Code == 13                         -> throw({emongo_authorization_error, ErrorMsg});
+    true                               -> ok
   end.
 
 time_call({Command, Collection, Selector, _Options}, Fun) ->
@@ -1317,7 +1520,19 @@ time_call({Command, Collection, Selector, _Options}, Fun) ->
     _                             -> Res
   end.
 
-get_timeout(Options, Pool) -> proplists:get_value(timeout, Options, Pool#pool.timeout).
+get_timeout(Options, Pool) ->
+  proplists:get_value(timeout, Options, Pool#pool.timeout).
+
+get_ordered_option(Ordered) when is_boolean(Ordered) ->
+  {<<"ordered">>, Ordered};
+get_ordered_option(Options) ->
+  {<<"ordered">>, proplists:get_value(ordered, Options, true)}.
+
+get_writeconcern_option(Options, Pool) ->
+  {<<"writeConcern">>, {struct,
+    [{<<"w">>,        proplists:get_value(write_concern,         Options, Pool#pool.write_concern)},
+     {<<"j">>,        proplists:get_value(journal_write_ack,     Options, Pool#pool.journal_write_ack)},
+     {<<"wtimeout">>, proplists:get_value(write_concern_timeout, Options, Pool#pool.write_concern_timeout)}]}}.
 
 to_binary(undefined)           -> undefined;
 to_binary(V) when is_binary(V) -> V;
@@ -1347,5 +1562,46 @@ set_read_preference(PoolId, Options) ->
 set_read_preference_int(undefined, Options) -> Options;
 set_read_preference_int(ReadPref,  Options) ->
   [{<<"$readPreference">>, [{<<"mode">>, ReadPref}]} | Options].
+
+% Merge response documents when calling a bulk function in batches
+merge_response_docs(undefined, Resp = #response{documents = [_Doc]}) ->
+  Resp;
+merge_response_docs(AccResp = #response{documents = [AccDoc]}, #response{documents = [Doc]}) ->
+  NewDoc =
+    [
+      {<<"ok">>, proplists:get_value(<<"ok">>, AccDoc, 0) band proplists:get_value(<<"ok">>, Doc, 0)},
+      {<<"n">>,  proplists:get_value(<<"n">>, AccDoc, 0)  +    proplists:get_value(<<"n">>, Doc, 0)}
+    ] ++
+    combine_write_errors(<<"writeErrors">>, AccDoc, Doc) ++
+    combine_write_errors(<<"writeConcernError">>, AccDoc, Doc),
+  AccResp#response{documents = [NewDoc]};
+merge_response_docs(_, Resp) ->
+  throw({emongo_error, {invalid_response, Resp}}).
+
+combine_write_errors(Key, AccDoc, Doc) ->
+  combine_write_error_lists(Key, proplists:get_value(Key, AccDoc), proplists:get_value(Key, Doc)).
+
+% This function handles the writeErrors key, which maps to {array, [e1, e2, ...]}
+% but also the writeConcernError key, which maps to a single error document.
+combine_write_error_lists(_, undefined, undefined) ->
+  [];
+combine_write_error_lists(Key, {array, AccRespWriteErrors}, undefined) ->
+  [{Key, {array, AccRespWriteErrors}}];
+combine_write_error_lists(Key, undefined, {array, RespWriteErrors}) ->
+  [{Key, {array, RespWriteErrors}}];
+combine_write_error_lists(Key, undefined, RespWriteError) ->
+  [{Key, {array, [RespWriteError]}}];
+combine_write_error_lists(Key, {array, AccRespWriteErrors}, {array, RespWriteErrors}) ->
+  [{Key, {array, AccRespWriteErrors ++ RespWriteErrors}}];
+combine_write_error_lists(Key, {array, AccRespWriteErrors}, RespWriteError) ->
+  [{Key, {array, AccRespWriteErrors ++ [RespWriteError]}}].
+
+% Get the next page of documents when calling a bulk function
+next_bulk_page([]) ->
+  {[], []};
+next_bulk_page(Documents) when length(Documents) > ?WRITE_CMD_LIMIT ->
+  lists:split(?WRITE_CMD_LIMIT, Documents);
+next_bulk_page(Documents) ->
+  {Documents, []}.
 
 % c("../../deps/emongo/src/emongo.erl", [{i, "../../deps/emongo/include"}]).
