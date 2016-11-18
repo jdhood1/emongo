@@ -41,9 +41,10 @@ run_test_() ->
       fun test_empty_sel_with_orderby/0,
       fun test_count/0,
       fun test_find_one/0,
-      fun test_encoding_performance/0,
       fun test_read_preferences/0,
       fun test_bulk_insert/0,
+      fun test_update_sync/0,
+      fun test_encoding_performance/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -177,6 +178,16 @@ test_bulk_insert() ->
 
   emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
   clear_coll(),
+  ?OUT("Test passed", []).
+
+test_update_sync() ->
+  ?OUT("Testing update_sync response", []),
+  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [{<<"a">>, 1}])),
+  ?assertMatch({emongo_no_match_found, _Doc},
+               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  ?assertEqual(ok,
+               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
   ?OUT("Test passed", []).
 
 test_encoding_performance() ->

@@ -1429,8 +1429,14 @@ get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) 
   % Check the value of the ok
   case {proplists:get_value(<<"ok">>, Doc, undefined), CheckMatchFound} of
     {undefined, _} -> throw({emongo_error, {invalid_response, Resp}});
-    {0, true}      -> {emongo_no_match_found, Doc};
     _              -> ok
+  end,
+
+  % Check the value of n, if CheckMatchFound is true
+  case CheckMatchFound andalso proplists:get_value(<<"n">>, Doc, undefined) of
+    undefined -> throw({emongo_error, {invalid_response, Resp}});
+    0         -> {emongo_no_match_found, Doc};
+    _         -> ok
   end;
 get_sync_result_new_proto(Resp, _CheckMatchFound) ->
   throw({emongo_error, {invalid_response, Resp}}).
