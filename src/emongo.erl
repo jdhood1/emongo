@@ -738,7 +738,7 @@ distinct(PoolId, Collection, Key, SubQuery, Options) ->
 
   Query = case SubQuery of
     [] -> Query0;
-    _ -> [ { <<"query">>, SubQuery } | Query0 ]
+    _  -> Query0 ++ [{<<"query">>, {struct, transform_selector(SubQuery)}}]
   end,
 
   case run_command(PoolId, Query, Options) of
