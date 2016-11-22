@@ -41,10 +41,13 @@ run_test_() ->
       fun test_empty_sel_with_orderby/0,
       fun test_count/0,
       fun test_find_one/0,
-      fun test_encoding_performance/0,
       fun test_read_preferences/0,
       fun test_duplicate_key_error/0,
       fun test_bulk_insert/0,
+      fun test_update_sync/0,
+      fun test_distinct/0,
+      fun test_encoding_performance/0,
+      fun test_read_preferences/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -189,6 +192,28 @@ test_bulk_insert() ->
   ?assertEqual(Count, length(WriteErrors)),
 
   emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
+  clear_coll(),
+  ?OUT("Test passed", []).
+
+test_update_sync() ->
+  ?OUT("Testing update_sync response", []),
+  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [{<<"a">>, 1}])),
+  ?assertMatch({emongo_no_match_found, _Doc},
+               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  ?assertEqual(ok,
+               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ok = clear_coll(),
+  ?OUT("Test passed", []).
+
+test_distinct() ->
+  ?OUT("Testing distinct", []),
+  lists:foreach(fun(X) ->
+    emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, [{<<"b">>, X rem 5}]}, {<<"c">>, X rem 50}])
+  end, lists:seq(1, 100)),
+  ?assertEqual([0, 1, 2, 3, 4], lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>))),
+  ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], []))),
+  ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], [?USE_SECD_PREF]))),
   clear_coll(),
   ?OUT("Test passed", []).
 
