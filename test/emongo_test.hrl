@@ -1,3 +1,7 @@
+-define(SMALL_DOCUMENT(N, TestName), [
+   {<<"index">>,N},
+   {<<"test">>,TestName}
+   ]).
 -define(REALLY_BIG_DOCUMENT, [
    {<<"region_name">>,<<"Atlanta">>},
    {<<"sh_session_id">>,<<"rental_purch_bookmark_smoke_test_user_814044:0000387e">>},
