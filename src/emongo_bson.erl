@@ -232,6 +232,12 @@ decode_value(9, <<MSecs:64/little-signed, Tail/binary>>) ->
 decode_value(10, Tail) ->
   {undefined, Tail};
 
+% REGEX
+decode_value(11, Tail1) ->
+  [Regex, Options, Tail2] = re:split(Tail1, "\\x00", [{return, binary}, {parts, 3}]),
+  OptionsList = [[Char] || Char <- binary_to_list(Options)],
+  {{regexp, Regex, OptionsList}, Tail2};
+
 %% Symbols (type 14) are handled as strings above (type 2).
 
 %% INT
