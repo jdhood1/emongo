@@ -18,6 +18,7 @@
 -define(USE_SECONDARY, {read_pref, <<"secondary">>}).
 -define(USE_SECD_PREF, {read_pref, <<"secondaryPreferred">>}).
 -define(USE_NEAREST,   {read_pref, <<"nearest">>}).
+-define(READ_PREF_OPT_KEY, read_pref).
 
 -define(EMONGO_PUBLIC, true).
 -endif.
