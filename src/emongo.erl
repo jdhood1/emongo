@@ -1348,6 +1348,7 @@ convert_value(_, Value) -> Value.
 
 % This function strips the input selector.  All values are replaced with 'undefined' while preserving the structure and
 % keys in the selector.  This is useful for tools that track queries to map them to indexes on the collection.
+strip_selector([]) -> undefined;
 strip_selector(Selector) ->
   lists:map(fun({Key, Value}) ->
     ConvKey   = convert_key(Key),
