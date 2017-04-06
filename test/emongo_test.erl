@@ -164,7 +164,7 @@ test_strip_selector() ->
                emongo:strip_selector([{<<"a">>, 1}, {<<"b">>, 1}])),
   ?assertEqual([{<<"$or">>, {array, [[{<<"a">>, undefined}], [{<<"a">>, undefined}]]}}],
                emongo:strip_selector([{<<"$or">>, {array, [[{<<"a">>, 1}], [{<<"a">>, 2}]]}}])),
-  ?assertEqual([{<<"markets">>, [{<<"$in">>, {array, [undefined, undefined]}}]}],
+  ?assertEqual([{<<"markets">>, [{<<"$in">>, undefined}]}],
                emongo:strip_selector([{<<"markets">>, [{<<"$in">>, {array, [<<"some thing">>, <<"ALL-MARKETS">>]}}]}])),
   % This is a ridiculous selector we have in our system that I'm including just for fun:
   Stripped1 = emongo:strip_selector([

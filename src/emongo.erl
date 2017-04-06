@@ -1350,23 +1350,18 @@ convert_value(_, Value) -> Value.
 % keys in the selector.  This is useful for tools that track queries to map them to indexes on the collection.
 strip_selector(Selector) ->
   lists:map(fun({Key, Value}) ->
-    ConvKey = convert_key(Key),
-    ForceDataType = force_data_type(ConvKey),
-    ConvValue = strip_value(ForceDataType, Value),
+    ConvKey   = convert_key(Key),
+    ConvValue = strip_value(Value),
     {ConvKey, ConvValue}
   end, Selector).
 
-strip_value(array, {array, Vals}) ->
-  {array, [strip_value(undefined, V) || V <- Vals]};
-strip_value(array, Vals) ->
-  strip_value(array, {array, Vals});
-strip_value(_, Sel) when ?IS_DOCUMENT(Sel) ->
+strip_value(Sel) when ?IS_DOCUMENT(Sel) ->
   strip_selector(Sel);
-strip_value(_, [SubSel | _] = SubSels) when ?IS_DOCUMENT(SubSel) ->
+strip_value([SubSel | _] = SubSels) when ?IS_DOCUMENT(SubSel) ->
   {array, [strip_selector(Sel) || Sel <- SubSels]};
-strip_value(_, {array, [SubSel | _] = SubSels}) when ?IS_DOCUMENT(SubSel) ->
+strip_value({array, [SubSel | _] = SubSels}) when ?IS_DOCUMENT(SubSel) ->
   {array, [strip_selector(Sel) || Sel <- SubSels]};
-strip_value(_, _Value) -> undefined.
+strip_value(_Value) -> undefined.
 
 dec0($a) ->  10;
 dec0($b) ->  11;
