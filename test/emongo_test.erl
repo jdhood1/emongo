@@ -33,23 +33,21 @@ run_test_() ->
     [
       fun test_upsert/0,
       %fun test_fetch_collections/0,
-      fun test_timing/0,
       fun test_req_id_rollover/0,
+      fun test_timing/0,
       fun test_drop_collection/0,
       fun test_drop_database/0,
-      fun test_upsert/0, % rerun upsert to make sure we can still do our work
       fun test_empty_sel_with_orderby/0,
       fun test_count/0,
       fun test_find_one/0,
       fun test_read_preferences/0,
       fun test_strip_selector/0,
-      fun test_encoding_performance/0,
       fun test_duplicate_key_error/0,
       fun test_bulk_insert/0,
       fun test_update_sync/0,
       fun test_distinct/0,
+      fun test_struct_syntax/0,
       fun test_encoding_performance/0,
-      fun test_read_preferences/0,
       {timeout, ?TIMEOUT div 1000, [fun test_performance/0]}
     ]
   }].
@@ -265,6 +263,17 @@ test_distinct() ->
   ?assertEqual([0, 1, 2, 3, 4], lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>))),
   ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], []))),
   ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], [?USE_SECD_PREF]))),
+  clear_coll(),
+  ?OUT("Test passed", []).
+
+test_struct_syntax() ->
+  ?OUT("Testing struct syntax", []),
+  Selector = {struct, [{<<"_id">>, {struct, [{<<"a">>, <<"struct_syntax_test">>}]}}]},
+  ?assertEqual(true, ?IS_DOCUMENT(Selector)),
+  ?assertEqual(true, ?IS_LIST_OF_DOCUMENTS([Selector])),
+  emongo:update_sync(?POOL, ?COLL, Selector, [{"$set", [{"data", 1}]}], true),
+  Find = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
+  ?assertEqual([[{<<"_id">>, [{<<"a">>, <<"struct_syntax_test">>}]}, {<<"data">>, 1}]], Find),
   clear_coll(),
   ?OUT("Test passed", []).
 

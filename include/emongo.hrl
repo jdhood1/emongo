@@ -19,18 +19,30 @@
 -define(DEBUG(Fmt, Args),     io:format("DEBUG (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
 -define(DUMP(X),              ?DEBUG("~p = ~p", [??X, X])).
 
--define(IS_DOCUMENT(Doc), (is_list(Doc) andalso (Doc == [] orelse (is_tuple(hd(Doc)) andalso tuple_size(hd(Doc)) == 2)))).
--define(IS_LIST_OF_DOCUMENTS(Docs), (
-	is_list(Docs) andalso (
-		Docs == [] orelse (
-			is_list(hd(Docs)) andalso (
-				hd(Docs) == [] orelse (
-					is_tuple(hd(hd(Docs))) andalso
-					tuple_size(hd(hd(Docs))) == 2
-				)
-			)
-		)
-	))).
+-define(IS_LIST_DOCUMENT(Doc),
+  ( is_list(Doc) andalso
+    ( Doc == [] orelse
+      ( is_tuple(hd(Doc)) andalso
+        tuple_size(hd(Doc)) == 2
+      )
+    )
+  )
+).
+-define(IS_DOCUMENT(Doc),
+  ?IS_LIST_DOCUMENT(Doc) or
+  ( is_tuple(Doc) andalso
+    tuple_size(Doc) == 2 andalso
+    element(1, Doc) == struct andalso
+    ?IS_LIST_DOCUMENT(element(2, Doc))
+  )
+).
+-define(IS_LIST_OF_DOCUMENTS(Docs),
+  ( is_list(Docs) andalso
+	  ( Docs == [] orelse
+      ?IS_DOCUMENT(hd(Docs))
+	  )
+	)
+).
 
 -record(pool, {id,
                host,

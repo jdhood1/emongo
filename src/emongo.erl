@@ -1288,6 +1288,8 @@ transform_options([Ignore | Rest], EmoQuery)
 transform_options([Invalid | _Rest], _EmoQuery) ->
   throw({emongo_invalid_option, Invalid}).
 
+transform_selector({struct, Selector}) ->
+  transform_selector(Selector);
 transform_selector(Selector) ->
   lists:map(fun(undefined)    -> undefined;
                ({Key, Value}) ->
@@ -1349,6 +1351,7 @@ convert_value(_, Value) -> Value.
 % This function strips the input selector.  All values are replaced with 'undefined' while preserving the structure and
 % keys in the selector.  This is useful for tools that track queries to map them to indexes on the collection.
 strip_selector([]) -> undefined;
+strip_selector({struct, Selector}) -> strip_selector(Selector);
 strip_selector(Selector) ->
   lists:map(fun({Key, Value}) ->
     ConvKey   = convert_key(Key),
