@@ -206,9 +206,9 @@ find(PoolId, Collection, Selector) -> find(PoolId, Collection, Selector, []).
 find(PoolId, Collection, Selector, OptionsIn) when ?IS_DOCUMENT(Selector),
                                                    is_list(OptionsIn) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Options = set_read_preference(PoolId, OptionsIn),
-  Query = create_query(Options, Selector),
-  Packet = emongo_packet:do_query(get_database(Pool, Collection), Collection,
+  Options      = [{<<"$maxTimeMS">>, get_timeout(OptionsIn, Pool)} | set_read_preference(PoolId, OptionsIn)],
+  Query        = create_query(Options, Selector),
+  Packet       = emongo_packet:do_query(get_database(Pool, Collection), Collection,
                                   Pool#pool.req_id, Query),
   Resp = send_recv_command(find, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
@@ -1325,8 +1325,9 @@ convert_key(elemMatch) -> <<"$elemMatch">>;
 convert_key(maxDistance) -> <<"$maxDistance">>;
 convert_key(geoWithin) -> <<"$geoWithin">>;
 convert_key(centerSphere) -> <<"$centerSphere">>;
-convert_key(box) -> <<"$box">>;
-convert_key(center) -> <<"$center">>.
+convert_key(box)       -> <<"$box">>;
+convert_key(center)    -> <<"$center">>;
+convert_key(regex)     -> <<"$regex">>.
 
 force_data_type(<<"$in">>)  -> array;
 force_data_type(<<"$nin">>) -> array;
@@ -1353,11 +1354,21 @@ convert_value(_, Value) -> Value.
 strip_selector([]) -> undefined;
 strip_selector({struct, Selector}) -> strip_selector(Selector);
 strip_selector(Selector) ->
-  lists:map(fun({Key, Value}) ->
-    ConvKey   = convert_key(Key),
-    ConvValue = strip_value(Value),
-    {ConvKey, ConvValue}
-  end, Selector).
+  ConvSel = lists:map(fun({Key, Value}) ->
+    % Some operations include a sub-document as the Value, such as $elemMatch, $and, $or, etc.  However, others do not,
+    % such as $in, $exists, $lte, etc.  In the former case, we need to recursively strip the selector.  In the latter
+    % case, we can just replace this Key/Value with 'undefined'.
+    ConvKey = to_binary(convert_key(Key)),
+    ConvVal = strip_value(Value),
+    case (binary:first(ConvKey) == $$) and (ConvVal == undefined) of
+      true -> undefined;
+      _    -> {ConvKey, ConvVal}
+    end
+  end, Selector),
+  case lists:filter(fun(undefined) -> false; (_) -> true end, ConvSel) of
+    []  -> undefined;
+    Res -> Res
+  end.
 
 strip_value(Sel) when ?IS_DOCUMENT(Sel) ->
   strip_selector(Sel);

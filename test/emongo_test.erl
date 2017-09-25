@@ -162,10 +162,16 @@ test_strip_selector() ->
                emongo:strip_selector([{<<"a">>, 1}, {<<"b">>, 1}])),
   ?assertEqual([{<<"$or">>, {array, [[{<<"a">>, undefined}], [{<<"a">>, undefined}]]}}],
                emongo:strip_selector([{<<"$or">>, {array, [[{<<"a">>, 1}], [{<<"a">>, 2}]]}}])),
-  ?assertEqual([{<<"markets">>, [{<<"$in">>, undefined}]}],
+  ?assertEqual([{<<"markets">>, undefined}],
                emongo:strip_selector([{<<"markets">>, [{<<"$in">>, {array, [<<"some thing">>, <<"ALL-MARKETS">>]}}]}])),
-  ?assertEqual([{<<"markets">>, [{<<"$in">>, undefined}]}],
+  ?assertEqual([{<<"markets">>, undefined}],
                emongo:strip_selector([{<<"markets">>, [{<<"$in">>, {array, []}}]}])),
+  ?assertEqual([{<<"a">>, undefined}],
+               emongo:strip_selector([{<<"a">>, [{<<"$in">>, [1,2,3]}]}])),
+  ?assertEqual([{<<"a">>, [{<<"$elemMatch">>, [{<<"b">>, undefined}]}]}],
+               emongo:strip_selector([{<<"a">>, [{<<"$elemMatch">>, [{<<"b">>, 1}]}]}])),
+  ?assertEqual([{<<"a">>, undefined}],
+               emongo:strip_selector([{<<"a">>, [{<<"$exists">>, true}]}])),
   % This is a ridiculous selector we have in our system that I'm including just for fun:
   Stripped1 = emongo:strip_selector([
     {<<"a">>, 1},
@@ -193,14 +199,38 @@ test_strip_selector() ->
       ]}}],
       [{<<"$or">>, {array, [
         [{<<"start_date_time">>, undefined}],
-        [{<<"start_date_time">>, [{<<"$lte">>, undefined}]}]
+        [{<<"start_date_time">>, undefined}]
       ]}}],
       [{<<"$or">>, {array, [
         [{<<"end_date_time">>, undefined}],
-        [{<<"end_date_time">>, [{<<"$gte">>, undefined}]}]
+        [{<<"end_date_time">>, undefined}]
       ]}}]
     ]}}],
   ?assertEqual(ExpectedRes1, Stripped1),
+  % This is another ridiculous selector we have in our system that I'm including just for fun:
+  Stripped2 = emongo:strip_selector([
+    {<<"r">>, <<"Denver">>},
+    {<<"h">>, 12345},
+    {<<"s">>, 1},
+    {<<"status">>, <<"online">>},
+    {<<"avail">>, [{<<"$gte">>, 12345}]},
+    {<<"mp">>, [{<<"$elemMatch">>, [
+      {<<"avail">>, true},
+      {<<"time">>,  [{"$lte", 12345}]}
+    ]}]}
+  ]),
+  ExpectedRes2 = [
+    {<<"r">>, undefined},
+    {<<"h">>, undefined},
+    {<<"s">>, undefined},
+    {<<"status">>, undefined},
+    {<<"avail">>, undefined},
+    {<<"mp">>, [{<<"$elemMatch">>, [
+      {<<"avail">>, undefined},
+      {<<"time">>,  undefined}
+    ]}]}
+  ],
+  ?assertEqual(ExpectedRes2, Stripped2),
   ?OUT("Test passed", []).
 
 test_duplicate_key_error() ->
