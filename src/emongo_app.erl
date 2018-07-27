@@ -32,6 +32,6 @@ start(_, _) ->
 stop(_) -> ok.
 
 %init(_) ->
-%   {ok, {{one_for_one, 10, 10}, [
+%   {ok, {{one_for_one, 0, 10}, [
 %       {emongo, {emongo, start_link, []}, permanent, 5000, worker, [emongo]}
 %   ]}}.
