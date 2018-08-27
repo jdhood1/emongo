@@ -1,13 +1,20 @@
-all: emake
+ifdef suites
+	suites_opt = suites=$(suites)
+endif
 
-emake:
-	erl -make
+eunit_dir = .eunit
 
-test: emake
-	prove t/*.t
+all: compile
 
-check: emake
-	@ERL_FLAGS="-config app.config" ./rebar eunit skip_deps=true
+compile:
+	@./rebar compile
+
+# "set -o pipefail" is here to ensure that the exit status of the rebar call gets returned past the pipe if it fails.
+check: compile
+	@mkdir -p $(eunit_dir)
+	@rm -rf $(eunit_dir)/*.log
+	@bash -c "set -o pipefail && ERL_FLAGS=\"-config app.config\" ./rebar eunit skip_deps=true $(suites_opt) | tee $(eunit_dir)/test.log"
 
 clean:
-	rm -rf $(wildcard ebin/*.beam) erl_crash.dump .eunit/
+	@./rebar clean
+	@rm -rf erl_crash.dump $(eunit_dir)

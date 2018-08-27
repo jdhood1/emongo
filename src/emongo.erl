@@ -307,7 +307,7 @@ insert_sync(PoolId, Collection, DocumentsIn, Options) ->
   Resp = insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, undefined),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> get_sync_result_new_proto(Resp, false)
+    false -> get_sync_result(Resp, false)
   end.
 
 insert_sync_page(_, _, _, [], _, _, AccResp) ->
@@ -396,7 +396,7 @@ update_sync(PoolId, Collection, Selector, Document, Upsert, Options)
   Resp    = send_recv_command(update_sync, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> get_sync_result_new_proto(Resp, not Upsert)
+    false -> get_sync_result(Resp, not Upsert)
   end.
 
 %------------------------------------------------------------------------------
@@ -424,7 +424,7 @@ update_all_sync(PoolId, Collection, Selector, Document, Options)
   Resp    = send_recv_command(update_all_sync, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> get_sync_result_new_proto(Resp, false)
+    false -> get_sync_result(Resp, false)
   end.
 
 %------------------------------------------------------------------------------
@@ -470,7 +470,7 @@ delete_sync(PoolId, Collection, Selector, Options) ->
   Resp    = send_recv_command(delete_sync, Collection, Selector, Options, Conn, Pool, Packet),
   case lists:member(response_options, Options) of
     true  -> Resp;
-    false -> get_sync_result_new_proto(Resp, true)
+    false -> get_sync_result(Resp, true)
   end.
 
 %------------------------------------------------------------------------------
@@ -504,7 +504,7 @@ create_index(Conn, Pool, Collection, Keys, IndexName, Options) ->
   Query        = create_cmd(<<"createIndexes">>, Collection, CreateIdxDoc, -1, []),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(create_index, Collection, undefined, [], Conn, Pool, Packet),
-  get_sync_result_new_proto(Resp, false).
+  get_sync_result(Resp, false).
 
 generate_index_name([], AccName) ->
   AccName;
@@ -524,7 +524,7 @@ drop_index(PoolId, Collection, IndexName) ->
   Query        = create_cmd(<<"dropIndexes">>, Collection, DropIdxDoc, -1, []),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(drop_index, Collection, undefined, [], Conn, Pool, Packet),
-  get_sync_result_new_proto(Resp, false).
+  get_sync_result(Resp, false).
 
 %------------------------------------------------------------------------------
 % count
@@ -567,15 +567,13 @@ aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(aggregate, Collection, Pipeline, Options, Conn, Pool, Packet),
   RespOpts     = lists:member(response_options, Options),
-  case Resp of
-    _ when RespOpts -> Resp;
-    #response{documents=[Doc]} ->
-      case proplists:get_value(<<"ok">>, Doc, undefined) of
-        undefined -> throw({emongo_aggregation_failed, Resp});
-        _ ->
-          {array, Res} = proplists:get_value(<<"result">>, Doc),
-          Res
-      end
+  RespOk       = response_ok(Resp),
+  if
+    RespOpts -> Resp;
+    RespOk   ->
+      {array, Res} = proplists:get_value(<<"result">>, hd(Resp#response.documents)),
+      Res;
+    true -> throw({emongo_aggregation_failed, Resp})
   end.
 
 %%------------------------------------------------------------------------------
@@ -608,10 +606,9 @@ find_and_modify(PoolId, Collection, Selector, Update, Options)
     % TODO - throw error (specific error or a generic emongo_error) if errmsg is returned,
     % else return the documents. To do this we will need to make sure any application using
     % find_and_modify is able to handle the errors.
-      #response{documents=[Res]} = Resp,
-      case proplists:get_value(<<"errmsg">>, Res) of
+      case error_msg(Resp) of
         undefined     -> ok;
-        ErrorMsg      -> throw_specific_errors(ErrorMsg, Res)
+        ErrorMsg      -> throw_specific_errors(ErrorMsg, hd(Resp#response.documents))
       end,
       Resp#response.documents
   end.
@@ -628,17 +625,11 @@ drop_collection(PoolId, Collection, Options) when is_atom(PoolId) ->
   Packet   = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp     = send_recv_command(drop_collection, "$cmd", Query, Options, Conn, Pool, Packet),
   RespOpts = lists:member(response_options, Options),
-  case Resp of
-    _ when RespOpts -> Resp;
-    #response{documents=[Res]} ->
-      case proplists:get_value(<<"ok">>, Res, undefined) of
-        undefined ->
-          case proplists:get_value(<<"errmsg">>, Res, undefined) of
-            undefined -> throw({emongo_drop_collection_failed, proplists:get_value(<<"msg">>, Res, <<>>)});
-            Error     -> throw({emongo_drop_collection_failed, Error})
-          end;
-        _ -> ok
-      end
+  RespOk   = response_ok(Resp),
+  if
+    RespOpts -> Resp;
+    RespOk   -> ok;
+    true     -> throw({emongo_drop_collection_failed, error_msg(Resp)})
   end.
 
 get_collections(PoolId) -> get_collections(PoolId, []).
@@ -676,19 +667,12 @@ get_databases(PoolId, OptionsIn) ->
   Database = to_binary(get_database(Pool, undefined)),
   Packet   = emongo_packet:do_query(Database, "$cmd", Pool#pool.req_id, Query),
   Resp     = send_recv_command(get_databases, "$cmd", Query, Options, Conn, Pool, Packet),
-
   RespOpts = lists:member(response_options, Options),
-  case Resp of
-    _ when RespOpts -> Resp;
-    #response{documents=[Res]} ->
-      case proplists:get_value(<<"ok">>, Res, undefined) of
-        undefined ->
-          case proplists:get_value(<<"errmsg">>, Res, undefined) of
-            undefined -> throw({emongo_get_databases_failed, proplists:get_value(<<"msg">>, Res, <<>>)});
-            Error     -> throw({emongo_get_databases_failed, Error})
-          end;
-        _ -> ok
-      end
+  RespOk   = response_ok(Resp),
+  if
+    RespOpts -> Resp;
+    RespOk   -> ok;
+    true     -> throw({emongo_get_databases_failed, error_msg(Resp)})
   end.
 
 distinct(PoolId, Collection, Key) -> distinct(PoolId, Collection, Key, [], []).
@@ -753,17 +737,11 @@ drop_database(PoolId, Options) ->
   Packet   = emongo_packet:do_query(get_database(Pool, undefined), "$cmd", Pool#pool.req_id, Query),
   Resp     = send_recv_command(drop_database, undefined, Selector, Options, Conn, Pool, Packet),
   RespOpts = lists:member(response_options, Options),
-  case Resp of
-    _ when RespOpts -> Resp;
-    #response{documents=[Res]} ->
-      case proplists:get_value(<<"ok">>, Res, undefined) of
-        undefined ->
-          case proplists:get_value(<<"errmsg">>, Res, undefined) of
-            undefined -> throw({emongo_drop_database_failed, proplists:get_value(<<"msg">>, Res, <<>>)});
-            Error     -> throw({emongo_drop_database_failed, Error})
-          end;
-        _ -> ok
-      end
+  RespOk   = response_ok(Resp),
+  if
+    RespOpts -> Resp;
+    RespOk   -> ok;
+    true     -> throw({emongo_drop_database_failed, error_msg(Resp)})
   end.
 
 %====================================================================
@@ -944,11 +922,7 @@ do_open_connections(#pool{id                  = PoolId,
     true ->
       % The emongo_conn:start_link function will throw an exception if it is unable to connect.
       {ok, Conn} = emongo_conn:start_link(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions),
-      MaxWireVer = case Pool#pool.max_wire_version of
-        undefined -> get_max_wire_version(<<"admin">>, Pool, Conn);
-        Ver       -> Ver
-      end,
-      NewPool = do_auth(Conn, Pool#pool{max_wire_version = MaxWireVer}),
+      NewPool = do_auth(Conn, Pool),
       do_open_connections(NewPool#pool{conns = queue:in(Conn, Conns)});
     false -> Pool
   end.
@@ -1031,37 +1005,25 @@ do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) ->
   end,
   do_auth(Others, Conn, Pool#pool{req_id = Pool#pool.req_id + 1}).
 
-get_max_wire_version(DB, Pool, Conn) ->
-  IsMasterQuery = #emo_query{q = [{<<"isMaster">>, 1}], limit = 1},
-  Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, IsMasterQuery),
-  Resp = send_recv_command(do_auth, "$cmd", undefined, [], Conn, Pool, Packet),
-  [Res] = Resp#response.documents,
-  case proplists:get_value(<<"ok">>, Res) of
-    1.0 -> case proplists:get_value(<<"maxWireVersion">>, Res) of
-             undefined -> 0;
-             Version   -> Version
-           end;
-    _   -> 0
-  end.
-
 authorize_conn_for_db(DB, Pool, Query, Conn) ->
   Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, Query),
   Resp = send_recv_command(do_auth, "$cmd", undefined, [], Conn, Pool, Packet),
-  [Res] = Resp#response.documents,
-  case proplists:get_value(<<"ok">>, Res) of
-    1.0 -> ok;
-    _   -> throw({emongo_authentication_failed, proplists:get_value(<<"errmsg">>, Res)})
+  case response_ok(Resp) of
+    true  -> ok;
+    false -> throw({emongo_authentication_failed, error_msg(Resp)})
   end.
 
 scram_authorize_conn(DB, Pool, Query, Conn) ->
   Packet = emongo_packet:do_query(DB, "$cmd", Pool#pool.req_id, Query),
   Resp = send_recv_command(scram_authorize_conn, "$cmd", undefined, [], Conn, Pool, Packet),
-  [Res] = Resp#response.documents,
-  case proplists:get_value(<<"ok">>, Res) of
-    1.0 -> EncodedPayload = proplists:get_value(<<"payload">>, Res),
-           Payload = parse_scram_response(base64:decode(EncodedPayload)),
-           {Res, Payload};
-    _   -> throw({emongo_authentication_failed, proplists:get_value(<<"errmsg">>, Resp)})
+  case response_ok(Resp) of
+    true ->
+      Doc = hd(Resp#response.documents),
+      EncodedPayload = proplists:get_value(<<"payload">>, Doc),
+      Payload = parse_scram_response(base64:decode(EncodedPayload)),
+      {Doc, Payload};
+    false ->
+      throw({emongo_authentication_failed, error_msg(Resp)})
   end.
 
 parse_scram_response(Resp) ->
@@ -1348,7 +1310,7 @@ send_command(Command, Collection, Selector, Options, Conn, Pool, Packet) ->
 
 % TODO: Include selector in emongo_error messages.
 
-get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) ->
+get_sync_result(Resp = #response{documents = [Doc]}, CheckMatchFound) ->
   % Throw an exception if there were write errors returned
   case proplists:get_value(<<"writeErrors">>, Doc, undefined) of
     undefined -> ok;
@@ -1357,36 +1319,32 @@ get_sync_result_new_proto(Resp = #response{documents = [Doc]}, CheckMatchFound) 
         ErrorMsg = proplists:get_value(<<"errmsg">>, Error, undefined),
         throw_specific_errors(ErrorMsg, Error)
       end, ErrorList),
-      throw({emongo_error, ErrorList});
-    _ -> ok
+      throw({emongo_error, ErrorList})
   end,
-
   % Throw an exception if there were write concern errors returned
   case proplists:get_value(<<"writeConcernError">>, Doc, undefined) of
     undefined -> ok;
     Error     -> throw({emongo_error, Error})
   end,
-
-  % In some cases, error can be under <<"errmsg">> as well
-  case proplists:get_value(<<"errmsg">>, Doc, undefined) of
-    undefined     -> ok;
-    ErrorMsg      -> throw_specific_errors(ErrorMsg, Doc),
-                     throw({emongo_error, ErrorMsg})
+  % In some cases, error can be in the error message as well
+  case error_msg(Resp) of
+    undefined -> ok;
+    ErrorMsg  ->
+      throw_specific_errors(ErrorMsg, Doc),
+      throw({emongo_error, ErrorMsg})
   end,
-
   % Check the value of the ok
-  case proplists:get_value(<<"ok">>, Doc, undefined) of
-    undefined -> throw({emongo_error, {invalid_response, Resp}});
-    _         -> ok
+  case response_ok(Resp) of
+    true  -> ok;
+    false -> throw({emongo_error, {invalid_response, Resp}})
   end,
-
   % Check the value of n, if CheckMatchFound is true
   case CheckMatchFound andalso proplists:get_value(<<"n">>, Doc, undefined) of
     undefined -> throw({emongo_error, {invalid_response, Resp}});
     0         -> {emongo_no_match_found, Doc};
     _         -> ok
   end;
-get_sync_result_new_proto(Resp, _CheckMatchFound) ->
+get_sync_result(Resp, _CheckMatchFound) ->
   throw({emongo_error, {invalid_response, Resp}}).
 
 throw_specific_errors(ErrorMsg, Doc) ->
@@ -1467,11 +1425,11 @@ set_read_preference_int(ReadPref,  Options) ->
 % Merge response documents when calling a bulk function in batches
 merge_response_docs(undefined, Resp = #response{documents = [_Doc]}) ->
   Resp;
-merge_response_docs(AccResp = #response{documents = [AccDoc]}, #response{documents = [Doc]}) ->
+merge_response_docs(AccResp = #response{documents = [AccDoc]}, Resp = #response{documents = [Doc]}) ->
   NewDoc =
     [
-      {<<"ok">>, proplists:get_value(<<"ok">>, AccDoc, 0) band proplists:get_value(<<"ok">>, Doc, 0)},
-      {<<"n">>,  proplists:get_value(<<"n">>, AccDoc, 0)  +    proplists:get_value(<<"n">>, Doc, 0)}
+      {<<"ok">>, case response_ok(AccResp) and response_ok(Resp) of true -> 1.0; _ -> 0.0 end},
+      {<<"n">>,  proplists:get_value(<<"n">>, AccDoc, 0) + proplists:get_value(<<"n">>, Doc, 0)}
     ] ++
     combine_write_errors(<<"writeErrors">>, AccDoc, Doc) ++
     combine_write_errors(<<"writeConcernError">>, AccDoc, Doc),
@@ -1504,5 +1462,16 @@ next_bulk_page(Documents) when length(Documents) > ?WRITE_CMD_LIMIT ->
   lists:split(?WRITE_CMD_LIMIT, Documents);
 next_bulk_page(Documents) ->
   {Documents, []}.
+
+response_ok(#response{documents = [Doc]}) ->
+  case proplists:get_value(<<"ok">>, Doc, undefined) of
+    1    -> true;
+    1.0  -> true;
+    _    -> false
+  end;
+response_ok(_) -> false.
+
+error_msg(#response{documents = [Doc]}) ->
+  proplists:get_value(<<"errmsg">>, Doc, undefined).
 
 % c("../../deps/emongo/src/emongo.erl", [{i, "../../deps/emongo/include"}]).

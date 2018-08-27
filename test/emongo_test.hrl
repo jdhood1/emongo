@@ -1,3 +1,5 @@
+-include_lib("eunit/include/eunit.hrl").
+
 -define(SMALL_DOCUMENT(N, TestName), [
    {<<"index">>,N},
    {<<"test">>,TestName}
