@@ -10,6 +10,7 @@
 -define(OP_DELETE, 2006).
 -define(OP_KILL_CURSORS, 2007).
 -define(SYS_NAMESPACES, "system.namespaces").
+-define(DEFAULT_LIMIT, 16#7FFFFFFF).
 
 -define(EXCEPTION(Fmt, Args), io:format("EXCEPTION (~p:~p): " Fmt "\n~p\n", [?MODULE, ?LINE | Args] ++
                                                                             [erlang:get_stacktrace()])).
@@ -63,4 +64,4 @@
                disconnect_timeouts   = 10,
                max_wire_version      = undefined}).
 -record(header, {message_length, request_id, response_to, op_code}).
--record(emo_query, {opts=0, offset=0, limit=16#7FFFFFFF, q=[], field_selector=[]}).
+-record(emo_query, {opts=0, offset=0, limit=?DEFAULT_LIMIT, q=[], field_selector=[]}).

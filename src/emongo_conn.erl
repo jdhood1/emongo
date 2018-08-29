@@ -47,16 +47,14 @@ send(Pid, ReqId, Packet, Timeout) ->
   gen_call(Pid, emongo_conn_send, ReqId, {ReqId, Packet}, Timeout).
 
 send_sync(Pid, ReqId, Packet1, Packet2, Timeout) ->
-  Resp = gen_call(Pid, emongo_conn_send_sync, ReqId,
-                  {ReqId, Packet1, Packet2}, Timeout),
+  Resp = gen_call(Pid, emongo_conn_send_sync, ReqId, {ReqId, Packet1, Packet2}, Timeout),
   Documents = emongo_bson:decode(Resp#response.documents),
   Resp#response{documents=Documents}.
 
 send_recv(Pid, ReqId, Packet, Timeout) ->
-  Resp = gen_call(Pid, emongo_conn_send_recv, ReqId, {ReqId, Packet},
-                  Timeout),
+  Resp = gen_call(Pid, emongo_conn_send_recv, ReqId, {ReqId, Packet}, Timeout),
   Documents = emongo_bson:decode(Resp#response.documents),
-  Resp#response{documents=Documents}.
+  Resp#response{documents = Documents}.
 
 queue_lengths(Pid) ->
   case erlang:process_info(Pid, message_queue_len) of

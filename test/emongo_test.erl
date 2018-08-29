@@ -13,6 +13,7 @@
 -define(FUNCTION_NAME,     element(2, element(2, process_info(self(), current_function)))).
 -define(STARTING,          ?OUT("~p", [?FUNCTION_NAME])).
 -define(FIND_OPTIONS,      []).
+-define(TEST_DATABASE,     <<"testdatabase">>).
 
 run_test_() ->
   [{setup,
@@ -20,10 +21,12 @@ run_test_() ->
     fun ?MODULE:cleanup/1,
     [
       fun ?MODULE:test_upsert/0,
+      fun ?MODULE:test_cursors/0,
       %fun ?MODULE:test_fetch_collections/0,
       fun ?MODULE:test_req_id_rollover/0,
       fun ?MODULE:test_timing/0,
       fun ?MODULE:test_drop_collection/0,
+      fun ?MODULE:test_get_databases/0,
       fun ?MODULE:test_drop_database/0,
       fun ?MODULE:test_empty_sel_with_orderby/0,
       fun ?MODULE:test_count/0,
@@ -35,6 +38,7 @@ run_test_() ->
       fun ?MODULE:test_update_sync/0,
       fun ?MODULE:test_distinct/0,
       fun ?MODULE:test_struct_syntax/0,
+      fun ?MODULE:test_aggregate/0,
       fun ?MODULE:test_encoding_performance/0,
       {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_performance/0]}
     ]
@@ -43,7 +47,7 @@ run_test_() ->
 setup() ->
   ensure_started(sasl),
   ensure_started(emongo),
-  emongo:add_pool(?POOL, <<"localhost">>, 27017, <<"testdatabase">>, ?POOL_SIZE),
+  emongo:add_pool(?POOL, <<"localhost">>, 27017, ?TEST_DATABASE, ?POOL_SIZE),
   emongo:delete_sync(?POOL, ?COLL),
   ok.
 
@@ -52,7 +56,8 @@ cleanup(_) ->
   ok.
 
 clear_coll() ->
-  emongo:delete_sync(?POOL, ?COLL).
+  emongo:delete_sync(?POOL, ?COLL),
+  ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -61,15 +66,55 @@ test_upsert() ->
   Selector = [{<<"_id">>, <<"upsert_test">>}],
   UpsertRes1 = emongo:update_sync(?POOL, ?COLL, Selector,
                                   [{"$set", [{"data", 1}]}], true),
-  ?assertEqual(ok, UpsertRes1),
+  ?assertEqual(1, UpsertRes1),
   Find1 = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
   ?assertEqual([Selector ++ [{<<"data">>, 1}]], Find1),
 
   UpsertRes2 = emongo:update_sync(?POOL, ?COLL, Selector,
                                   [{"$set", [{"data", 2}]}], true),
-  ?assertEqual(ok, UpsertRes2),
+  ?assertEqual(1, UpsertRes2),
   Find2 = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
   ?assertEqual([Selector ++ [{<<"data">>, 2}]], Find2),
+  clear_coll().
+
+test_cursors() ->
+  ?STARTING,
+  emongo:insert_sync(?POOL, ?COLL, [
+    [{<<"a">>, 9}],
+    [{<<"a">>, 8}],
+    [{<<"a">>, 7}],
+    [{<<"a">>, 6}],
+    [{<<"a">>, 5}],
+    [{<<"a">>, 4}],
+    [{<<"a">>, 3}],
+    [{<<"a">>, 2}],
+    [{<<"a">>, 1}],
+    [{<<"a">>, 0}]
+  ]),
+  % Running emongo:find(...) ensures that the "limit" argument is working properly.
+  ResSome = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {limit, 5}, {orderby, [{<<"a">>, 1}]}]),
+  ?assertEqual([
+    [{<<"a">>, 0}],
+    [{<<"a">>, 1}],
+    [{<<"a">>, 2}],
+    [{<<"a">>, 3}],
+    [{<<"a">>, 4}]
+  ], ResSome),
+  % Running emongo:find_all(...) ensures that cursors are working because not all documents are returned in a single
+  % call.
+  ResAll = emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {limit, 5}, {orderby, [{<<"a">>, 1}]}]),
+  ?assertEqual([
+    [{<<"a">>, 0}],
+    [{<<"a">>, 1}],
+    [{<<"a">>, 2}],
+    [{<<"a">>, 3}],
+    [{<<"a">>, 4}],
+    [{<<"a">>, 5}],
+    [{<<"a">>, 6}],
+    [{<<"a">>, 7}],
+    [{<<"a">>, 8}],
+    [{<<"a">>, 9}]
+  ], ResAll),
   clear_coll().
 
 % TODO: Why isn't this working?
@@ -99,6 +144,13 @@ test_drop_collection() ->
   ?STARTING,
   ok = emongo:drop_collection(?POOL, ?COLL),
   ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL, ?FIND_OPTIONS))).
+
+test_get_databases() ->
+  ?STARTING,
+  emongo:insert_sync(?POOL, ?COLL, [{<<"_id">>, <<"get_databases_test">>}]),
+  Databases = lists:sort(emongo:get_databases(?POOL)),
+  ?assert(lists:member(?TEST_DATABASE, Databases)),
+  clear_coll().
 
 test_drop_database() ->
   ?STARTING,
@@ -266,11 +318,9 @@ test_bulk_insert() ->
 test_update_sync() ->
   ?STARTING,
   ?assertEqual([], emongo:find_all(?POOL, ?COLL, [{<<"a">>, 1}])),
-  ?assertMatch({emongo_no_match_found, _Doc},
-               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ?assertEqual(0, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
   ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
-  ?assertEqual(ok,
-               emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ?assertEqual(1, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
   ok = clear_coll().
 
 test_distinct() ->
@@ -291,6 +341,28 @@ test_struct_syntax() ->
   emongo:update_sync(?POOL, ?COLL, Selector, [{"$set", [{"data", 1}]}], true),
   Find = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
   ?assertEqual([[{<<"_id">>, [{<<"a">>, <<"struct_syntax_test">>}]}, {<<"data">>, 1}]], Find),
+  clear_coll().
+
+test_aggregate() ->
+  ?STARTING,
+  emongo:insert_sync(?POOL, ?COLL, [
+    [{<<"a">>, 1}, {<<"b">>, 1}],
+    [{<<"a">>, 1}, {<<"b">>, 2}],
+    [{<<"a">>, 1}, {<<"b">>, 3}],
+    [{<<"a">>, 2}, {<<"b">>, 4}],
+    [{<<"a">>, 2}, {<<"b">>, 5}]
+  ]),
+  Res = emongo:aggregate(?POOL, ?COLL, [
+    [{<<"$match">>, [{<<"b">>, [{<<"$gte">>, 2}]}]}],
+    [{<<"$group">>, [
+      {<<"_id">>, <<"$a">>},
+      {<<"sum_b">>, [{<<"$sum">>, <<"$b">>}]}
+    ]}]
+  ], [{batch_size, 1}]),
+  ?assertEqual([
+    [{<<"_id">>, 1}, {<<"sum_b">>, 5}],
+    [{<<"_id">>, 2}, {<<"sum_b">>, 9}]
+  ], lists:sort(Res)),
   clear_coll().
 
 test_encoding_performance() ->
@@ -357,9 +429,9 @@ run_single_test(X, Y) ->
 check_result(Desc,
              {response, _,_,_,_,_, [List]},
              ExpectedN) when is_list(List) ->
-  Ok  = proplists:get_value(<<"ok">>, List),
+  Ok  = round(proplists:get_value(<<"ok">>, List)),
   Err = proplists:get_value(<<"err">>, List),
-  N   = proplists:get_value(<<"n">>, List),
+  N   = round(proplists:get_value(<<"n">>, List)),
   if Err == undefined, N == ExpectedN -> ok;
      Ok == 1, Err == undefined, Desc == insert_sync, N == 1 -> ok;
      Ok == 1, Err == undefined, N == ExpectedN -> ok;
