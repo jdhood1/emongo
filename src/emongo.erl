@@ -598,12 +598,9 @@ find_and_modify(PoolId, Collection, Selector, Update, Options)
                             [{limit, 1} | Options]),
   Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(find_and_modify, Collection, Selector, Options, Conn, Pool, Packet),
-  RespOpts     = lists:member(response_options, Options),
-  ErrMsg       = error_msg(Resp),
-  if
-    RespOpts            -> Resp;
-    ErrMsg == undefined -> response_docs(Resp);
-    true                -> throw_specific_errors(ErrMsg, response_first_doc(Resp))
+  case get_sync_result(Resp, Options) of
+    ok  -> response_docs(Resp);
+    Ret -> Ret
   end.
 
 %====================================================================
@@ -1329,40 +1326,34 @@ get_sync_result(Resp, Options) ->
 
 get_sync_result(Resp) ->
   Doc = response_first_doc(Resp),
-  % Throw an exception if there were write errors returned
+  % Check the root-level of the response document.
+  assert_resp_code(Doc),
+  % Check writeErrors.
   case proplists:get_value(<<"writeErrors">>, Doc, undefined) of
     undefined -> ok;
-    {array, ErrorList} ->
-      lists:foreach(fun(Error) ->
-        ErrorMsg = proplists:get_value(<<"errmsg">>, Error, undefined),
-        throw_specific_errors(ErrorMsg, Error)
-      end, ErrorList),
-      throw({emongo_error, ErrorList})
+    {array, Errors} ->
+      lists:foreach(fun(Error) -> assert_resp_code(Error) end, Errors),
+      throw({emongo_error, Errors})
   end,
-  % Throw an exception if there were write concern errors returned
+  % Check writeConcernError.
   case proplists:get_value(<<"writeConcernError">>, Doc, undefined) of
     undefined -> ok;
     Error     -> throw({emongo_error, Error})
   end,
-  % In some cases, error can be in the error message as well
-  case error_msg(Resp) of
-    undefined -> ok;
-    ErrorMsg  ->
-      throw_specific_errors(ErrorMsg, Doc),
-      throw({emongo_error, ErrorMsg})
-  end,
-  % Check the value of the ok
+  % Check for an "ok" response.
   case response_ok(Resp) of
     true  -> ok;
     false -> throw({emongo_error, {invalid_response, Resp}})
   end.
 
-throw_specific_errors(ErrorMsg, Doc) ->
-  Code = proplists:get_value(<<"code">>, Doc),
-  if
-    (Code == 11000) or (Code == 11001) -> throw({emongo_error, duplicate_key, ErrorMsg});
-    (Code == 13)                       -> throw({emongo_authorization_error, ErrorMsg});
-    true                               -> ok
+assert_resp_code(Doc) ->
+  case proplists:get_value(<<"code">>, Doc, undefined) of
+    undefined -> ok;
+    0         -> ok;
+    11000     -> throw({emongo_error, duplicate_key, error_msg(Doc)});
+    11001     -> throw({emongo_error, duplicate_key, error_msg(Doc)});
+    13        -> throw({emongo_authorization_error, error_msg(Doc)});
+    Code      -> throw({emongo_error, {Code, error_msg(Doc)}})
   end.
 
 time_call({Command, Collection, Selector, _Options}, Fun) ->
@@ -1481,7 +1472,8 @@ response_ok(#response{documents = [Doc]}) ->
   end;
 response_ok(Resp) -> throw({emongo_error, {invalid_response, Resp}}).
 
-error_msg(#response{documents = [Doc]}) -> proplists:get_value(<<"errmsg">>, Doc, undefined);
+error_msg([_|_] = Doc)                  -> proplists:get_value(<<"errmsg">>, Doc, undefined);
+error_msg(#response{documents = [Doc]}) -> error_msg(Doc);
 error_msg(Resp)                         -> throw({emongo_error, {invalid_response, Resp}}).
 
 response_docs(#response{documents = Docs}) -> Docs;
