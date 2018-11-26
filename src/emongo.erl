@@ -296,32 +296,31 @@ insert(PoolId, Collection, DocumentsIn) ->
 insert_sync(PoolId, Collection, Documents) ->
   insert_sync(PoolId, Collection, Documents, []).
 
-insert_sync(_, _, [], Options) ->
-  case lists:member(response_options, Options) of
-    true  -> #response{};
-    false -> ok
-  end;
+insert_sync(_PoolId, _Collection, [], _Options) ->
+  % Note that, if response_options is passed in with an empty list of documents to be inserted, 'ok' is still returned
+  % instead of a #response{} record.
+  ok;
 insert_sync(PoolId, Collection, DocumentsIn, Options) ->
   Documents = if
     ?IS_LIST_OF_DOCUMENTS(DocumentsIn) -> DocumentsIn;
     ?IS_DOCUMENT(DocumentsIn)          -> [DocumentsIn]
   end,
-  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
   {FirstPage, Rest} = next_bulk_page(Documents),
-  Resp = insert_sync_page(Conn, Pool, Collection, FirstPage, Rest, Options, undefined),
+  Resp = insert_sync_page(PoolId, Collection, FirstPage, Rest, Options, undefined),
   get_sync_result(Resp, Options).
 
-insert_sync_page(_, _, _, [], _, _, AccResp) ->
+insert_sync_page(_, _, [], _, _, AccResp) ->
   AccResp;
-insert_sync_page(Conn, Pool, Collection, FirstPage, Rest, Options, AccResp) ->
-  Ordered    = proplists:get_value(ordered, Options, true),
-  InsertDoc  = [{<<"documents">>, {array, FirstPage}},
-                get_ordered_option(Ordered),
-                get_writeconcern_option(Options, Pool)],
-  Query      = create_cmd(<<"insert">>, Collection, InsertDoc, -1, Options),
-  Packet     = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
-  Resp       = send_recv_command(insert_sync, Collection, undefined, Options, Conn, Pool, Packet),
-  NewAccResp = merge_response_docs(AccResp, Resp),
+insert_sync_page(PoolId, Collection, FirstPage, Rest, Options, AccResp) ->
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
+  Ordered      = proplists:get_value(ordered, Options, true),
+  InsertDoc    = [{<<"documents">>, {array, FirstPage}},
+                  get_ordered_option(Ordered),
+                  get_writeconcern_option(Options, Pool)],
+  Query        = create_cmd(<<"insert">>, Collection, InsertDoc, -1, Options),
+  Packet       = emongo_packet:do_query(get_database(Pool, Collection), "$cmd", Pool#pool.req_id, Query),
+  Resp         = send_recv_command(insert_sync, Collection, undefined, Options, Conn, Pool, Packet),
+  NewAccResp   = merge_insert_sync_page_response(AccResp, Resp),
 
   % Break out early if the request is ordered and a write error occurred
   case Ordered andalso proplists:is_defined(<<"writeErrors">>, response_first_doc(Resp)) of
@@ -329,7 +328,7 @@ insert_sync_page(Conn, Pool, Collection, FirstPage, Rest, Options, AccResp) ->
       NewAccResp;
     false ->
       {NextPage, NewRest} = next_bulk_page(Rest),
-      insert_sync_page(Conn, Pool, Collection, NextPage, NewRest, Options, NewAccResp)
+      insert_sync_page(PoolId, Collection, NextPage, NewRest, Options, NewAccResp)
   end.
 
 %------------------------------------------------------------------------------
@@ -384,7 +383,7 @@ update_sync(PoolId, Collection, Selector, Document, Upsert)
 
 update_sync(PoolId, Collection, Selector, Document, Upsert, Options)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
-  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   UpdateDoc = [{<<"updates">>, [[{<<"q">>,      {struct, transform_selector(Selector)}},
                                  {<<"u">>,      {struct, Document}},
                                  {<<"upsert">>, Upsert}]]},
@@ -412,7 +411,7 @@ update_all_sync(PoolId, Collection, Selector, Document)
 
 update_all_sync(PoolId, Collection, Selector, Document, Options)
     when ?IS_DOCUMENT(Selector), ?IS_DOCUMENT(Document) ->
-  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   UpdateDoc = [{<<"updates">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
                                  {<<"u">>,     {struct, Document}},
                                  {<<"multi">>, true}]]},
@@ -457,7 +456,7 @@ delete_sync(PoolId, Collection, Selector) ->
   delete_sync(PoolId, Collection, Selector, []).
 
 delete_sync(PoolId, Collection, Selector, Options) ->
-  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   DeleteDoc = [{<<"deletes">>, [[{<<"q">>,     {struct, transform_selector(Selector)}},
                                  {<<"limit">>, 0}]]},
                get_ordered_option(Options),
@@ -820,6 +819,8 @@ handle_call({remove_pool, PoolId}, _From, #state{pools=Pools}=State) ->
 handle_call({conn, PoolId}, From, State) ->
   handle_call({conn, PoolId, 1}, From, State);
 handle_call({conn, PoolId, NumReqs}, _From, #state{pools = Pools} = State) ->
+  % With the new wire protocol, NumReqs should always be 1 since we no longer need to issue the getLastError call in
+  % tandum with the actual call.  However, the unit tests need this extra clause to test rolling over the request ID.
   case get_pool(PoolId, Pools) of
     undefined ->
       {reply, {undefined, undefined}, State};
@@ -1322,7 +1323,6 @@ send_command(Command, Collection, Selector, Options, Conn, Pool, Packet) ->
   end.
 
 % TODO: Include selector in emongo_error messages.
-
 get_sync_result(Resp, Options) ->
   case lists:member(response_options, Options) of
     true  -> Resp;
@@ -1428,10 +1428,10 @@ set_read_preference_int(undefined, Options) -> Options;
 set_read_preference_int(ReadPref,  Options) ->
   [{<<"$readPreference">>, [{<<"mode">>, ReadPref}]} | Options].
 
-% Merge response documents when calling a bulk function in batches
-merge_response_docs(undefined, Resp = #response{documents = [_Doc]}) ->
+merge_insert_sync_page_response(undefined, Resp = #response{documents = [_Doc]}) ->
+  % The accumulator is the default one, so this is the first response.
   Resp;
-merge_response_docs(AccResp = #response{documents = [AccDoc]}, Resp = #response{documents = [Doc]}) ->
+merge_insert_sync_page_response(AccResp = #response{documents = [AccDoc]}, Resp = #response{documents = [Doc]}) ->
   NewDoc =
     [
       {<<"ok">>, case response_ok(AccResp) and response_ok(Resp) of true -> 1.0; _ -> 0.0 end},
@@ -1440,7 +1440,7 @@ merge_response_docs(AccResp = #response{documents = [AccDoc]}, Resp = #response{
     combine_write_errors(<<"writeErrors">>,       AccDoc, Doc) ++
     combine_write_errors(<<"writeConcernError">>, AccDoc, Doc),
   AccResp#response{documents = [NewDoc]};
-merge_response_docs(_, Resp) ->
+merge_insert_sync_page_response(_, Resp) ->
   throw({emongo_error, {invalid_response, Resp}}).
 
 combine_write_errors(Key, AccDoc, Doc) ->
