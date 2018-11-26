@@ -296,21 +296,26 @@ insert(PoolId, Collection, DocumentsIn) ->
 insert_sync(PoolId, Collection, Documents) ->
   insert_sync(PoolId, Collection, Documents, []).
 
+insert_sync(_, _, [], Options) ->
+  case lists:member(response_options, Options) of
+    true  -> #response{};
+    false -> ok
+  end;
 insert_sync(PoolId, Collection, DocumentsIn, Options) ->
   Documents = if
     ?IS_LIST_OF_DOCUMENTS(DocumentsIn) -> DocumentsIn;
     ?IS_DOCUMENT(DocumentsIn)          -> [DocumentsIn]
   end,
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId, 2}, infinity),
-  {Head, Tail} = next_bulk_page(Documents),
-  Resp = insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, undefined),
+  {FirstPage, Rest} = next_bulk_page(Documents),
+  Resp = insert_sync_page(Conn, Pool, Collection, FirstPage, Rest, Options, undefined),
   get_sync_result(Resp, Options).
 
 insert_sync_page(_, _, _, [], _, _, AccResp) ->
   AccResp;
-insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, AccResp) ->
+insert_sync_page(Conn, Pool, Collection, FirstPage, Rest, Options, AccResp) ->
   Ordered    = proplists:get_value(ordered, Options, true),
-  InsertDoc  = [{<<"documents">>, {array, Head}},
+  InsertDoc  = [{<<"documents">>, {array, FirstPage}},
                 get_ordered_option(Ordered),
                 get_writeconcern_option(Options, Pool)],
   Query      = create_cmd(<<"insert">>, Collection, InsertDoc, -1, Options),
@@ -323,8 +328,8 @@ insert_sync_page(Conn, Pool, Collection, Head, Tail, Options, AccResp) ->
     true ->
       NewAccResp;
     false ->
-      {NewHead, NewTail} = next_bulk_page(Tail),
-      insert_sync_page(Conn, Pool, Collection, NewHead, NewTail, Options, NewAccResp)
+      {NextPage, NewRest} = next_bulk_page(Rest),
+      insert_sync_page(Conn, Pool, Collection, NextPage, NewRest, Options, NewAccResp)
   end.
 
 %------------------------------------------------------------------------------

@@ -25,16 +25,18 @@
 -export([start_link/6, stop/1, send/4, send_sync/5, send_recv/4, queue_lengths/1, write_pid/1]).
 -export([init_loop/6]).
 
--record(state, {pool_id,
-                socket,
-                host,
-                port,
-                socket_options,
-                dict = dict:new(),
-                socket_data = <<>>,
-                max_pipeline_depth,
-                disconnect_timeouts,
-                timeout_count = 0}).
+-record(state, {
+  pool_id,
+  socket,
+  host,
+  port,
+  socket_options,
+  dict = dict:new(),
+  socket_data = <<>>,
+  max_pipeline_depth,
+  disconnect_timeouts,
+  timeout_count = 0
+}).
 
 start_link(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions) ->
   Args = [PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions],
@@ -69,13 +71,15 @@ write_pid(Pid) -> Pid.
 init_loop(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions) ->
   Socket = open_socket(Host, Port, SocketOptions),
   ok = proc_lib:init_ack({ok, self()}),
-  loop(#state{pool_id             = PoolId,
-              socket              = Socket,
-              host                = Host,
-              port                = Port,
-              socket_options      = SocketOptions,
-              max_pipeline_depth  = MaxPipelineDepth,
-              disconnect_timeouts = DisconnectTimeouts}).
+  loop(#state{
+    pool_id             = PoolId,
+    socket              = Socket,
+    host                = Host,
+    port                = Port,
+    socket_options      = SocketOptions,
+    max_pipeline_depth  = MaxPipelineDepth,
+    disconnect_timeouts = DisconnectTimeouts
+  }).
 
 loop(State = #state{socket = Socket,
                     dict   = Dict}) ->
@@ -113,8 +117,7 @@ loop(State = #state{socket = Socket,
         NewTimeoutCount = State#state.timeout_count + 1,
         case NewTimeoutCount > State#state.disconnect_timeouts of
           true -> exit(emongo_too_many_timeouts);
-          _    -> State#state{dict          = dict:erase(ReqId, Dict),
-                              timeout_count = NewTimeoutCount}
+          _    -> State#state{dict = dict:erase(ReqId, Dict), timeout_count = NewTimeoutCount}
         end;
       {tcp_closed, _Socket}        -> exit(emongo_tcp_closed);
       {tcp_error, _Socket, Reason} -> exit({emongo, Reason});
@@ -164,7 +167,7 @@ gen_call(Pid, Label, ReqId, Request, Timeout) ->
         % However, if this happens after a connection goes down, it's expected.
         exit:timeout -> exit({emongo_conn_error, overloaded});
         % Any other error should not override the timeout we are already handling.
-        _:E          -> E
+        _:E -> E
       end,
       exit({emongo_conn_error, timeout});
     _:_ ->
@@ -182,8 +185,7 @@ gen_call(Pid, Label, ReqId, Request, Timeout) ->
       exit({emongo_conn_error, connection_closed})
   end.
 
-process_bin(State = #state{dict        = Dict,
-                           socket_data = Data}) ->
+process_bin(State = #state{dict = Dict, socket_data = Data}) ->
   case emongo_packet:decode_response(Data) of
     undefined -> State;
     {Resp = #response{header = #header{response_to = ResponseTo}}, Tail} ->
