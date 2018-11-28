@@ -22,7 +22,7 @@
 %% OTHER DEALINGS IN THE SOFTWARE.
 -module(emongo_conn).
 -include("emongo.hrl").
--export([start_link/6, stop/1, send/4, send_sync/5, send_recv/4, queue_lengths/1, write_pid/1]).
+-export([start_link/6, stop/1, send/4, send_recv/4, queue_lengths/1, write_pid/1]).
 -export([init_loop/6]).
 
 -record(state, {
@@ -47,11 +47,6 @@ stop(Pid) ->
 
 send(Pid, ReqId, Packet, Timeout) ->
   gen_call(Pid, emongo_conn_send, ReqId, {ReqId, Packet}, Timeout).
-
-send_sync(Pid, ReqId, Packet1, Packet2, Timeout) ->
-  Resp = gen_call(Pid, emongo_conn_send_sync, ReqId, {ReqId, Packet1, Packet2}, Timeout),
-  Documents = emongo_bson:decode(Resp#response.documents),
-  Resp#response{documents=Documents}.
 
 send_recv(Pid, ReqId, Packet, Timeout) ->
   Resp = gen_call(Pid, emongo_conn_send_recv, ReqId, {ReqId, Packet}, Timeout),
@@ -86,17 +81,24 @@ loop(State = #state{socket = Socket,
   CanSend = (State#state.max_pipeline_depth == 0) or (dict:size(Dict) < State#state.max_pipeline_depth),
   NewState = try
     _NewState = receive
+      % Calls to 'receive' will preserve the order of the message queue.  Calls to receive will not prioritize messages
+      % that match clauses below in the order of the clauses.  It will match them in the order of the messages in the
+      % queue:
+      %   1> Pid = self().
+      %   <0.33.0>
+      %   2> Pid ! a.
+      %   a
+      %   3> Pid ! b.
+      %   b
+      %   4> receive b -> b; a -> a end.
+      %   a
+      %   5> receive b -> b; a -> a end.
+      %   b
       % FromRef = {From, Mref}
       {emongo_conn_send, FromRef, {_ReqId, Packet}} when CanSend ->
         ok = gen_tcp:send(Socket, Packet),
         gen:reply(FromRef, ok),
         State;
-      {emongo_conn_send_sync, FromRef, {ReqId, Packet1, Packet2}} when CanSend ->
-        % Packet2 is the packet containing getlasterror.
-        % Send both packets in the same TCP packet for performance reasons.
-        % It's about 3 times faster.
-        ok = gen_tcp:send(Socket, <<Packet1/binary, Packet2/binary>>),
-        State#state{dict = dict:append(ReqId, FromRef, Dict)};
       {emongo_conn_send_recv, FromRef, {ReqId, Packet}} when CanSend ->
         ok = gen_tcp:send(Socket, Packet),
         State#state{dict = dict:append(ReqId, FromRef, Dict)};
@@ -109,9 +111,8 @@ loop(State = #state{socket = Socket,
         % If the message related to this request is still in the mailbox waiting to be sent (when CanSend is true), go
         % ahead and clear it out (without regard for how CanSend is set).
         receive
-          {emongo_conn_send,      _FromRef, {ReqId, _}}    -> ok;
-          {emongo_conn_send_sync, _FromRef, {ReqId, _, _}} -> ok;
-          {emongo_conn_send_recv, _FromRef, {ReqId, _}}    -> ok
+          {emongo_conn_send,      _FromRef, {ReqId, _}} -> ok;
+          {emongo_conn_send_recv, _FromRef, {ReqId, _}} -> ok
         after 0 -> ok
         end,
         NewTimeoutCount = State#state.timeout_count + 1,

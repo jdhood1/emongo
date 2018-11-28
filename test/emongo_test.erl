@@ -12,7 +12,6 @@
 -define(OUT(F, D),         ?debugFmt(F, D)).
 -define(FUNCTION_NAME,     element(2, element(2, process_info(self(), current_function)))).
 -define(STARTING,          ?OUT("~p", [?FUNCTION_NAME])).
--define(FIND_OPTIONS,      []).
 -define(TEST_DATABASE,     <<"testdatabase">>).
 
 run_test_() ->
@@ -20,8 +19,9 @@ run_test_() ->
     fun ?MODULE:setup/0,
     fun ?MODULE:cleanup/1,
     [
+      fun ?MODULE:test_find/0,
+      fun ?MODULE:test_update_sync/0,
       fun ?MODULE:test_upsert/0,
-      fun ?MODULE:test_cursors/0,
       %fun ?MODULE:test_fetch_collections/0,
       fun ?MODULE:test_req_id_rollover/0,
       fun ?MODULE:test_timing/0,
@@ -30,16 +30,16 @@ run_test_() ->
       fun ?MODULE:test_drop_database/0,
       fun ?MODULE:test_empty_sel_with_orderby/0,
       fun ?MODULE:test_count/0,
-      fun ?MODULE:test_find_one/0,
       fun ?MODULE:test_read_preferences/0,
       fun ?MODULE:test_strip_selector/0,
       fun ?MODULE:test_duplicate_key_error/0,
       fun ?MODULE:test_bulk_insert/0,
-      fun ?MODULE:test_update_sync/0,
       fun ?MODULE:test_distinct/0,
       fun ?MODULE:test_struct_syntax/0,
       fun ?MODULE:test_aggregate/0,
       fun ?MODULE:test_encoding_performance/0,
+      fun ?MODULE:test_lots_of_documents/0,
+      fun ?MODULE:test_large_data/0,
       {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_performance/0]}
     ]
   }].
@@ -61,23 +61,7 @@ clear_coll() ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-test_upsert() ->
-  ?STARTING,
-  Selector = [{<<"_id">>, <<"upsert_test">>}],
-  UpsertRes1 = emongo:update_sync(?POOL, ?COLL, Selector,
-                                  [{"$set", [{"data", 1}]}], true),
-  ?assertEqual(1, UpsertRes1),
-  Find1 = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
-  ?assertEqual([Selector ++ [{<<"data">>, 1}]], Find1),
-
-  UpsertRes2 = emongo:update_sync(?POOL, ?COLL, Selector,
-                                  [{"$set", [{"data", 2}]}], true),
-  ?assertEqual(1, UpsertRes2),
-  Find2 = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
-  ?assertEqual([Selector ++ [{<<"data">>, 2}]], Find2),
-  clear_coll().
-
-test_cursors() ->
+test_find() ->
   ?STARTING,
   emongo:insert_sync(?POOL, ?COLL, [
     [{<<"a">>, 9}],
@@ -91,37 +75,66 @@ test_cursors() ->
     [{<<"a">>, 1}],
     [{<<"a">>, 0}]
   ]),
-  % Running emongo:find(...) ensures that the "limit" argument is working properly.
-  ResSome = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {limit, 5}, {orderby, [{<<"a">>, 1}]}]),
+  Res1 = emongo:find(?POOL, ?COLL, [{<<"a">>, [{<<"$lte">>, 4}]}],
+                     [{limit, 2}, {orderby, [{<<"a">>, 1}]}, {fields, [{<<"_id">>, 0}]}]),
+  ?assertEqual([
+    [{<<"a">>, 0}],
+    [{<<"a">>, 1}]
+  ], Res1),
+  Res2 = emongo:find(?POOL, ?COLL, [{<<"a">>, [{<<"$lte">>, 4}]}],
+                     [{orderby, [{<<"a">>, asc}]}, {fields, [{<<"_id">>, 0}]}]),
   ?assertEqual([
     [{<<"a">>, 0}],
     [{<<"a">>, 1}],
     [{<<"a">>, 2}],
     [{<<"a">>, 3}],
     [{<<"a">>, 4}]
-  ], ResSome),
-  % Running emongo:find_all(...) ensures that cursors are working because not all documents are returned in a single
-  % call.
-  ResAll = emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {limit, 5}, {orderby, [{<<"a">>, 1}]}]),
+  ], Res2),
+  Res3 = emongo:find(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
   ?assertEqual([
-    [{<<"a">>, 0}],
-    [{<<"a">>, 1}],
-    [{<<"a">>, 2}],
-    [{<<"a">>, 3}],
-    [{<<"a">>, 4}],
-    [{<<"a">>, 5}],
-    [{<<"a">>, 6}],
-    [{<<"a">>, 7}],
-    [{<<"a">>, 8}],
+    [{<<"a">>, 9}],
+    [{<<"a">>, 8}]
+  ], Res3),
+  Res4 = emongo:find_one(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, -1}]}, {fields, [{<<"_id">>, 0}]}]),
+  ?assertEqual([
     [{<<"a">>, 9}]
-  ], ResAll),
+  ], Res4),
+  Res5 = emongo:find_all(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
+  ?assertEqual([
+    [{<<"a">>, 9}],
+    [{<<"a">>, 8}]
+  ], Res5),
+  clear_coll().
+
+test_update_sync() ->
+  ?STARTING,
+  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [{<<"a">>, 1}])),
+  ?assertEqual(0, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  ?assertEqual(1, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
+  ok = clear_coll().
+
+test_upsert() ->
+  ?STARTING,
+  Selector = [{<<"_id">>, <<"upsert_test">>}],
+  UpsertRes1 = emongo:update_sync(?POOL, ?COLL, Selector,
+                                  [{"$set", [{"data", 1}]}], true),
+  ?assertEqual(1, UpsertRes1),
+  Find1 = emongo:find(?POOL, ?COLL, Selector),
+  ?assertEqual([Selector ++ [{<<"data">>, 1}]], Find1),
+
+  UpsertRes2 = emongo:update_sync(?POOL, ?COLL, Selector,
+                                  [{"$set", [{"data", 2}]}], true),
+  ?assertEqual(1, UpsertRes2),
+  Find2 = emongo:find(?POOL, ?COLL, Selector),
+  ?assertEqual([Selector ++ [{<<"data">>, 2}]], Find2),
   clear_coll().
 
 % TODO: Why isn't this working?
 %test_fetch_collections() ->
 %  ?STARTING,
 %  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
-%  Res = lists:sort(emongo:get_collections(?POOL, ?FIND_OPTIONS)),
+%  Res = lists:sort(emongo:get_collections(?POOL)),
 %  ?OUT("Res = ~p", [Res]),
 %  ?assertEqual([?COLL], Res),
 %  clear_coll().
@@ -143,7 +156,7 @@ test_timing() ->
 test_drop_collection() ->
   ?STARTING,
   ok = emongo:drop_collection(?POOL, ?COLL),
-  ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL, ?FIND_OPTIONS))).
+  ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL))).
 
 test_get_databases() ->
   ?STARTING,
@@ -160,30 +173,22 @@ test_empty_sel_with_orderby() ->
   ?STARTING,
   emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 2}],
                                     [{<<"a">>, 1}]]),
-  Res = emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]} | ?FIND_OPTIONS]),
+  Res = emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]}]),
   ?assertEqual([[{<<"a">>, 1}],
                 [{<<"a">>, 2}]], Res),
   clear_coll(),
-  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [], ?FIND_OPTIONS)).
+  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [])).
 
 test_count() ->
   ?STARTING,
   emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}], [{<<"a">>, 3}], [{<<"a">>, 4}], [{<<"a">>, 5}]]),
   %?OUT("Resp = ~p", [emongo:count(?POOL, ?COLL, [{<<"$or">>, [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}],
   %                                [response_options])]),
-  ?assertEqual(5, emongo:count(?POOL, ?COLL, [], ?FIND_OPTIONS)),
-  ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"a">>, [{lte, 3}]}], ?FIND_OPTIONS)),
-  ?assertEqual(2, emongo:count(?POOL, ?COLL, [{<<"a">>, [{gt,  3}]}], ?FIND_OPTIONS)),
-  ?assertEqual(4, emongo:count(?POOL, ?COLL, [{<<"$or">>,  [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}],
-                               ?FIND_OPTIONS)),
-  ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"$and">>, [[{<<"a">>, [{gte, 2}]}], [{<<"a">>, [{lte, 4}]}]]}],
-                               ?FIND_OPTIONS)),
-  clear_coll().
-
-test_find_one() ->
-  ?STARTING,
-  emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}], [{<<"a">>, 2}], [{<<"a">>, 3}], [{<<"a">>, 3}]]),
-  ?assertEqual(1, length(emongo:find_one(?POOL, ?COLL, [{<<"a">>, 2}], ?FIND_OPTIONS))),
+  ?assertEqual(5, emongo:count(?POOL, ?COLL, [])),
+  ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"a">>, [{lte, 3}]}])),
+  ?assertEqual(2, emongo:count(?POOL, ?COLL, [{<<"a">>, [{gt,  3}]}])),
+  ?assertEqual(4, emongo:count(?POOL, ?COLL, [{<<"$or">>,  [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}])),
+  ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"$and">>, [[{<<"a">>, [{gte, 2}]}], [{<<"a">>, [{lte, 4}]}]]}])),
   clear_coll().
 
 test_read_preferences() ->
@@ -290,38 +295,24 @@ test_duplicate_key_error() ->
 test_bulk_insert() ->
   ?STARTING,
   Count = 5000,
-
   % Create an index used for creating writeErrors
   emongo:create_index(?POOL, ?COLL, [{<<"index">>, 1}], [{<<"unique">>, true}]),
-
   % Insert 5000 documents - emongo will break down into 5 calls
   Docs = lists:map(fun(N) ->
            ?SMALL_DOCUMENT(N, <<"bulk_insert">>)
          end, lists:seq(1, Count)),
-
   IRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options]),
   #response{documents=[IResDoc]} = IRes,
-
   % Check that ok and n values are aggregated
   ?assertEqual(1.0, proplists:get_value(<<"ok">>, IResDoc)),
   ?assertEqual(Count, proplists:get_value(<<"n">>, IResDoc)),
-
   % Check that writeErrors are aggregated
   IErrorRes = emongo:insert_sync(?POOL, ?COLL, Docs, [response_options, {ordered, false}]),
   #response{documents=[IErrorResDoc]} = IErrorRes,
   {array, WriteErrors} = proplists:get_value(<<"writeErrors">>, IErrorResDoc),
   ?assertEqual(Count, length(WriteErrors)),
-
   emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
   clear_coll().
-
-test_update_sync() ->
-  ?STARTING,
-  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [{<<"a">>, 1}])),
-  ?assertEqual(0, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
-  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
-  ?assertEqual(1, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
-  ok = clear_coll().
 
 test_distinct() ->
   ?STARTING,
@@ -339,7 +330,7 @@ test_struct_syntax() ->
   ?assertEqual(true, ?IS_DOCUMENT(Selector)),
   ?assertEqual(true, ?IS_LIST_OF_DOCUMENTS([Selector])),
   emongo:update_sync(?POOL, ?COLL, Selector, [{"$set", [{"data", 1}]}], true),
-  Find = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
+  Find = emongo:find_all(?POOL, ?COLL, Selector),
   ?assertEqual([[{<<"_id">>, [{<<"a">>, <<"struct_syntax_test">>}]}, {<<"data">>, 1}]], Find),
   clear_coll().
 
@@ -352,17 +343,24 @@ test_aggregate() ->
     [{<<"a">>, 2}, {<<"b">>, 4}],
     [{<<"a">>, 2}, {<<"b">>, 5}]
   ]),
-  Res = emongo:aggregate(?POOL, ?COLL, [
+  Aggregate = [
     [{<<"$match">>, [{<<"b">>, [{<<"$gte">>, 2}]}]}],
     [{<<"$group">>, [
       {<<"_id">>, <<"$a">>},
       {<<"sum_b">>, [{<<"$sum">>, <<"$b">>}]}
-    ]}]
-  ], [{batch_size, 1}]),
+    ]}],
+    [{<<"$sort">>, [{<<"sum_b">>, -1}]}]
+  ],
+  Res1 = (catch emongo:aggregate(?POOL, ?COLL, Aggregate)),
   ?assertEqual([
-    [{<<"_id">>, 1}, {<<"sum_b">>, 5}],
+    [{<<"_id">>, 2}, {<<"sum_b">>, 9}],
+    [{<<"_id">>, 1}, {<<"sum_b">>, 5}]
+  ], Res1),
+  Res2 = (catch emongo:aggregate(?POOL, ?COLL, Aggregate, [{limit, 1}])),
+  %?OUT("Res2 = ~p", [Res2]),
+  ?assertEqual([
     [{<<"_id">>, 2}, {<<"sum_b">>, 9}]
-  ], lists:sort(Res)),
+  ], Res2),
   clear_coll().
 
 test_encoding_performance() ->
@@ -379,6 +377,23 @@ test_encoding_performance() ->
     end, lists:seq(1, 1000))
   end),
   ?OUT("Encoding and writing a really big document to DB 1000 times took ~p microseconds", [WriteTime]),
+  clear_coll().
+
+test_lots_of_documents() ->
+  ?STARTING,
+  Docs = [[{<<"a">>, X}] || X <- lists:seq(1, 5000)],
+  ok   = emongo:insert_sync(?POOL, ?COLL, Docs),
+  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]}]),
+  ?assertEqual(Docs, Res),
+  clear_coll().
+
+test_large_data() ->
+  ?STARTING,
+  Data = <<0:(8*2*1048576)>>, % 2 MB
+  emongo:insert_sync(?POOL, ?COLL, [{<<"data">>, Data}]),
+  [Res]   = emongo:find(?POOL, ?COLL),
+  ResData = proplists:get_value(<<"data">>, Res),
+  ?assertEqual(Data, ResData),
   clear_coll().
 
 test_performance() ->
@@ -415,7 +430,7 @@ run_single_test(X, Y) ->
       [{<<"$set">>, [{<<"us">>, Num}]}], false, [response_options]),
     ok = check_result(update_sync, URes, 1),
 
-    FARes = emongo:find_all(?POOL, ?COLL, Selector, ?FIND_OPTIONS),
+    FARes = emongo:find_all(?POOL, ?COLL, Selector),
     ?assertEqual([Selector ++ [{<<"fm">>, Num}, {<<"us">>, Num}]], FARes),
 
     DRes = emongo:delete_sync(?POOL, ?COLL, Selector, [response_options]),
@@ -462,4 +477,4 @@ ensure_started(App) ->
   end.
 
 cur_time_ms() ->
-  erlang:system_time(seconds).
+  os:system_time(milli_seconds).

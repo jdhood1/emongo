@@ -66,9 +66,9 @@ do_query(Database, Collection, ReqID, Query) when is_record(Query, emo_query) ->
   Length = byte_size(Message),
     <<(Length+16):32/little-signed, ReqID:32/little-signed, 0:32, ?OP_QUERY:32/little-signed, Message/binary>>.
 
-get_more(Database, Collection, ReqID, NumToReturn, CursorID) ->
+get_more(Database, Collection, ReqID, BatchSize, CursorID) ->
   FullName = emongo:utf8_encode([Database, ".", Collection]),
-  Message = <<0:32, FullName/binary, 0, NumToReturn:32/little-signed, CursorID:64/little-signed>>,
+  Message = <<0:32, FullName/binary, 0, BatchSize:32/little-signed, CursorID:64/little-signed>>,
   Length = byte_size(Message),
     <<(Length+16):32/little-signed, ReqID:32/little-signed, 0:32, ?OP_GET_MORE:32/little-signed, Message/binary>>.
 

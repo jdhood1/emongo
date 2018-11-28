@@ -29,9 +29,9 @@
          pools/0, add_pool/5, add_pool/6, remove_pool/1,
          queue_lengths/0,
          register_collections_to_databases/2,
-         find/3, find/4,
+         find/2,     find/3,     find/4,
          find_all/2, find_all/3, find_all/4,
-         find_one/3, find_one/4,
+         find_one/2, find_one/3, find_one/4,
          kill_cursors/2,
          insert/3,
          insert_sync/3, insert_sync/4,
@@ -52,12 +52,14 @@
          dec2hex/1, hex2dec/1, utf8_encode/1,
          drop_collection/2, drop_collection/3,
          drop_database/1, drop_database/2, get_databases/1, get_databases/2,
-         strip_selector/1]).
+         strip_selector/1,
+         cur_time_ms/0]).
 
 -define(TIMING_KEY, emongo_timing).
 -define(MAX_TIMES,  10).
 -define(EMONGO_CONFIG, emongo_config).
 -define(SHA1_DIGEST_LEN, 20).
+-define(DEFAULT_LIMIT,   101). % MongoDB uses 101 as the default limit if limit is set to 0.
 -define(WRITE_CMD_LIMIT, 1000).
 
 -record(state, {pools, oid_index, hashed_hostn}).
@@ -187,7 +189,7 @@ register_collections_to_databases(PoolId, CollDbMap) ->
 %     Option = {timeout, Timeout} | {limit, Limit} | {offset, Offset} |
 %              {orderby, Orderby} | {fields, Fields} | response_options
 %     Timeout = integer (timeout in milliseconds)
-%     Limit = integer
+%     Limit = integer >= 0
 %     Offset = integer
 %     Orderby = [{Key, Direction}]
 %     Key = string() | binary() | atom() | integer()
@@ -198,68 +200,75 @@ register_collections_to_databases(PoolId, CollDbMap) ->
 %     response_options = return {response, header, response_flag, cursor_id,
 %                                offset, limit, documents}
 %     Result = documents() | response()
+find(PoolId, Collection)           -> find(PoolId, Collection, [],       []).
 find(PoolId, Collection, Selector) -> find(PoolId, Collection, Selector, []).
+find(PoolId, Collection, Selector, Options) when ?IS_DOCUMENT(Selector), is_list(Options) ->
+  BatchSize   = batch_size(Options),
+  FindOptions = [{limit, BatchSize} | lists:keydelete(limit, 1, Options)],
+  RespPre     = find_int(PoolId, Collection, Selector, FindOptions),
+  Resp        = get_all(PoolId, Collection, Options, RespPre),
+  case lists:member(response_options, Options) of
+    true  -> Resp;
+    false -> response_docs(Resp)
+  end.
 
-find(PoolId, Collection, Selector, OptionsIn) when ?IS_DOCUMENT(Selector), is_list(OptionsIn) ->
+% batch_size(Limit | Options, length(DocsSoFar))
+batch_size(Options) -> batch_size(Options, 0).
+batch_size(Options, NumDocs) when is_list(Options) ->
+  batch_size(proplists:get_value(limit, Options, 0), NumDocs);
+% For initial calls, such as find(...), when a limit of 0 is sent to MongoDB, it returns 101 documents, even if there
+% are more.  However, when get_more(...) is called with a bacth size of 0, all remaining documents are sent.  That is
+% why the batch size here is defaulted to ?DEFAULT_LIMIT.
+batch_size(0, _) -> ?DEFAULT_LIMIT;
+batch_size(Limit, NumDocs) when Limit > NumDocs ->
+  NumRemaining = Limit - NumDocs,
+  case NumRemaining >= ?DEFAULT_LIMIT of
+    true -> ?DEFAULT_LIMIT;
+    _    ->
+      % We could make this number negative to tell MongoDB to delete the cursor when this call is done.  However, with
+      % aggregate calls, the batch size has to be non-negative.
+      NumRemaining
+  end;
+batch_size(Limit, _) when Limit < 0 -> throw({emongo_error, {incorrect_limit, Limit}});
+batch_size(_, _) -> limit_reached.
+
+find_int(PoolId, Collection, Selector, OptionsIn) when ?IS_DOCUMENT(Selector), is_list(OptionsIn) ->
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   Options      = [{<<"$maxTimeMS">>, get_timeout(OptionsIn, Pool)} | set_read_preference(PoolId, OptionsIn)],
   Query        = create_query(Options, Selector),
-  Packet       = emongo_packet:do_query(get_database(Pool, Collection), Collection,
-                                  Pool#pool.req_id, Query),
-  Resp = send_recv_command(find, Collection, Selector, Options, Conn, Pool, Packet),
-  case lists:member(response_options, Options) of
-    true  -> Resp;
-    false -> response_docs(Resp)
-  end.
+  Packet       = emongo_packet:do_query(get_database(Pool, Collection), Collection, Pool#pool.req_id, Query),
+  send_recv_command(find, Collection, Selector, Options, Conn, Pool, Packet).
+
+get_all(PoolId, Collection, Options, Resp) ->
+  NumDocs   = length(response_docs(Resp)),
+  BatchSize = batch_size(Options, NumDocs),
+  get_all(PoolId, Collection, BatchSize, Options, Resp).
+
+get_all(_PoolId, _Collection,  limit_reached, _Options, Resp)                            -> Resp;
+get_all(_PoolId, _Collection, _BatchSize,     _Options, #response{cursor_id = 0} = Resp) -> Resp;
+get_all( PoolId,  Collection,  BatchSize,      Options, #response{cursor_id = CurId} = OldResp) ->
+  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
+  Packet       = emongo_packet:get_more(get_database(Pool, Collection), Collection, Pool#pool.req_id, BatchSize, CurId),
+  NewResp      = send_recv_command(get_all, Collection, CurId, [{batch_size, BatchSize} | Options], Conn, Pool, Packet),
+  DocsSoFar    = lists:append(response_docs(OldResp), response_docs(NewResp)),
+  get_all(PoolId, Collection, Options, NewResp#response{documents = DocsSoFar}).
 
 %------------------------------------------------------------------------------
 % find_all
+% If the 'limit' option is used, it determines the batch size, not the number of documents returned.  All documents will
+% be returned, even if that number exceeds the limit.  Use find(...) to limit the number of documents returned.
 %------------------------------------------------------------------------------
-find_all(PoolId, Collection) ->
-  find_all(PoolId, Collection, [], []).
-
-find_all(PoolId, Collection, Selector) when ?IS_DOCUMENT(Selector) ->
-  find_all(PoolId, Collection, Selector, []).
-
-find_all(PoolId, Collection, Selector, Options) when ?IS_DOCUMENT(Selector),
-                                                     is_list(Options) ->
-  RespPre = find(PoolId, Collection, Selector, [response_options|Options]),
-  Resp    = get_all(PoolId, Collection, 0, Options, RespPre),
-  case lists:member(response_options, Options) of
-    true  -> Resp;
-    false -> response_docs(Resp)
-  end.
+find_all(PoolId, Collection)                    -> find(PoolId, Collection).
+find_all(PoolId, Collection, Selector)          -> find(PoolId, Collection, Selector).
+find_all(PoolId, Collection, Selector, Options) -> find(PoolId, Collection, Selector, Options).
 
 %------------------------------------------------------------------------------
 % find_one
 %------------------------------------------------------------------------------
-find_one(PoolId, Collection, Selector) when ?IS_DOCUMENT(Selector) ->
-  find_one(PoolId, Collection, Selector, []).
-
-find_one(PoolId, Collection, Selector, Options) when ?IS_DOCUMENT(Selector),
-                                                     is_list(Options) ->
-  Options1 = [{limit, -1} | lists:keydelete(limit, 1, Options)],
-  find(PoolId, Collection, Selector, Options1).
-
-%------------------------------------------------------------------------------
-% get_all results from a cursor
-%------------------------------------------------------------------------------
-get_all(_PoolId, _Collection, _BatchSize, _Options, Resp)
-    when is_record(Resp, response), Resp#response.cursor_id == 0 ->
-  Resp;
-get_all(PoolId, Collection, BatchSize, Options, OldResp) when is_record(OldResp, response) ->
-  NewResp   = get_more(PoolId, Collection, OldResp#response.cursor_id, BatchSize, Options),
-  DocsSoFar = lists:append(response_docs(OldResp), response_docs(NewResp)),
-  get_all(PoolId, Collection, BatchSize, Options, NewResp#response{documents = DocsSoFar}).
-
-%------------------------------------------------------------------------------
-% get_more
-%------------------------------------------------------------------------------
-get_more(PoolId, Collection, CursorID, NumToReturn, Options) ->
-  {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Packet = emongo_packet:get_more(get_database(Pool, Collection), Collection,
-                                  Pool#pool.req_id, NumToReturn, CursorID),
-  send_recv_command(get_more, Collection, CursorID, [{num_to_return, NumToReturn} | Options], Conn, Pool, Packet).
+find_one(PoolId, Collection)           -> find_one(PoolId, Collection, [],       []).
+find_one(PoolId, Collection, Selector) -> find_one(PoolId, Collection, Selector, []).
+find_one(PoolId, Collection, Selector, Options) when is_list(Options) ->
+  find(PoolId, Collection, Selector, [{limit, 1} | lists:keydelete(limit, 1, Options)]).
 
 %------------------------------------------------------------------------------
 % kill_cursors
@@ -555,11 +564,9 @@ aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
   % "firstBatch" of results.  We then have to check the cursor and get the rest of the documents, if there are any.
   % When we get the rest of the documents, they are returned as normal documents, much like a "find" would return.
   % The results from these 2 different formats have to be merged together here and returned to the caller.
-  OptionsPre   = set_read_preference(PoolId, OptionsIn),
-  % batch_size specifies how many results will be returned at a time in the aggregate / get_more calls between emongo
-  % and MongoDB.  All results will still be returned together from this function.
-  BatchSize     = proplists:get_value(batch_size, OptionsPre, ?DEFAULT_LIMIT),
-  Options       = [{<<"cursor">>, [{<<"batchSize">>, BatchSize}]} | lists:keydelete(batch_size, 1, OptionsPre)],
+  OptionsPre    = set_read_preference(PoolId, OptionsIn),
+  BatchSize     = batch_size(OptionsPre),
+  Options       = [{<<"cursor">>, [{<<"batchSize">>, BatchSize}]} | OptionsPre],
   {Conn, Pool}  = gen_server:call(?MODULE, {conn, PoolId}, infinity),
   AggregateDoc  = [{<<"pipeline">>, {array, Pipeline}}],
   Query         = create_cmd(<<"aggregate">>, Collection, AggregateDoc, 1, Options),
@@ -573,7 +580,7 @@ aggregate(PoolId, Collection, Pipeline, OptionsIn) ->
       CursorInfo    = proplists:get_value(<<"cursor">>,     response_first_doc(Resp)),
       {array, Docs} = proplists:get_value(<<"firstBatch">>, CursorInfo),
       CursorId      = proplists:get_value(<<"id">>,         CursorInfo, Resp#response.cursor_id),
-      NewResp       = get_all(PoolId, Collection, 0, Options, Resp#response{cursor_id = CursorId, documents = Docs}),
+      NewResp       = get_all(PoolId, Collection, Options, Resp#response{cursor_id = CursorId, documents = Docs}),
       response_docs(NewResp);
     true -> throw({emongo_aggregation_failed, Resp})
   end.
