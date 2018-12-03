@@ -40,7 +40,7 @@ run_test_() ->
       fun ?MODULE:test_aggregate/0,
       fun ?MODULE:test_encoding_performance/0,
       fun ?MODULE:test_config_performance/0,
-      {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_lots_of_documents/0]},
+      fun ?MODULE:test_lots_of_documents/0,
       fun ?MODULE:test_large_data/0,
       {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_performance/0]}
     ]
@@ -56,7 +56,7 @@ setup() ->
     {write_concern_timeout, 4000},
     {disconnect_timeouts,   10},
     {default_read_pref,     <<"secondaryPreferred">>},
-    {max_batch_size,        1000}
+    {max_batch_size,        0}
   ],
   emongo:add_pool(?POOL, <<"localhost">>, 27017, ?TEST_DATABASE, ?POOL_SIZE, Options),
   emongo:delete_sync(?POOL, ?COLL),
@@ -442,10 +442,15 @@ test_lots_of_documents() ->
 test_large_data() ->
   ?STARTING,
   Data = <<0:(8*2*1048576)>>, % 2 MB
-  emongo:insert_sync(?POOL, ?COLL, [{<<"data">>, Data}]),
-  [Res]   = emongo:find(?POOL, ?COLL),
-  ResData = proplists:get_value(<<"data">>, Res),
-  ?assertEqual(Data, ResData),
+  Docs = [[{<<"a">>, X}, {<<"data">>, Data}] || X <- lists:seq(1, 50)],
+  % TODO: Once bulk insert limits messages to MongoDB to 16 MB, go back to doing a bulk insert here:
+  %ok   = emongo:insert_sync(?POOL, ?COLL, Docs),
+  lists:foreach(fun(Doc) ->
+    emongo:insert_sync(?POOL, ?COLL, Doc)
+  end, Docs),
+  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}]),
+  %?TEST_OUT("Res = ~p", [Res]),
+  ?assertEqual(Docs, Res),
   ?ENDING.
 
 test_performance() ->

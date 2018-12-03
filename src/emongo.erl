@@ -59,9 +59,6 @@
 -define(TIMING_KEY,      emongo_timing).
 -define(MAX_TIMES,       10).
 -define(SHA1_DIGEST_LEN, 20).
-% TODO: MongoDB limits bulk inserts to 1,000 in 3.4 and bumped that limit up to 100,000 for 3.6.  However, there is also
-%       a 16 MB limit on the message size.  That 16 MB limit is not enforced here.
--define(WRITE_CMD_LIMIT, 1000).
 
 -record(state, {pools, oid_index, hashed_hostn}).
 
@@ -251,7 +248,7 @@ batch_size(PoolId, 0, _) -> get_config(PoolId, max_batch_size);
 batch_size(PoolId, Limit, NumDocs) when Limit > NumDocs ->
   NumRemaining = Limit - NumDocs,
   MaxBatchSize = get_config(PoolId, max_batch_size),
-  case NumRemaining >= MaxBatchSize of
+  case (MaxBatchSize /= 0) and (NumRemaining >= MaxBatchSize) of
     true -> MaxBatchSize;
     _    ->
       % We could make this number negative to tell MongoDB to delete the cursor when this call is done.  However, with
@@ -336,7 +333,7 @@ insert_sync(PoolId, Collection, DocumentsIn, Options) ->
     ?IS_LIST_OF_DOCUMENTS(DocumentsIn) -> DocumentsIn;
     ?IS_DOCUMENT(DocumentsIn)          -> [DocumentsIn]
   end,
-  {FirstPage, Rest} = next_bulk_page(Documents),
+  {FirstPage, Rest} = next_bulk_page(PoolId, Documents),
   Resp = insert_sync_page(PoolId, Collection, FirstPage, Rest, Options, undefined),
   get_sync_result(Resp, Options).
 
@@ -358,7 +355,7 @@ insert_sync_page(PoolId, Collection, FirstPage, Rest, Options, AccResp) ->
     true ->
       NewAccResp;
     false ->
-      {NextPage, NewRest} = next_bulk_page(Rest),
+      {NextPage, NewRest} = next_bulk_page(PoolId, Rest),
       insert_sync_page(PoolId, Collection, NextPage, NewRest, Options, NewAccResp)
   end.
 
@@ -1484,12 +1481,19 @@ combine_write_error_lists(Key, {array, AccRespWriteErrors}, RespWriteError) ->
   [{Key, {array, AccRespWriteErrors ++ [RespWriteError]}}].
 
 % Get the next page of documents when calling a bulk function
-next_bulk_page([]) ->
+next_bulk_page(_PoolId, []) ->
   {[], []};
-next_bulk_page(Documents) when length(Documents) > ?WRITE_CMD_LIMIT ->
-  lists:split(?WRITE_CMD_LIMIT, Documents);
-next_bulk_page(Documents) ->
-  {Documents, []}.
+next_bulk_page(PoolId, Documents) ->
+  MaxBatchSize = case get_config(PoolId, max_batch_size) of
+    0   -> 1000;
+    MBS -> MBS
+  end,
+  % TODO: MongoDB limits bulk inserts to 1,000 in 3.4 and bumped that limit up to 100,000 for 3.6.  However, there is
+  %       also a 16 MB limit on the message size.  That 16 MB limit is not enforced here.
+  case length(Documents) > MaxBatchSize of
+    true -> lists:split(MaxBatchSize, Documents);
+    _    -> {Documents, []}
+  end.
 
 response_ok(#response{documents = [Doc]}) ->
   case proplists:get_value(<<"ok">>, Doc, undefined) of
