@@ -22,8 +22,8 @@
 %% OTHER DEALINGS IN THE SOFTWARE.
 -module(emongo_conn).
 -include("emongo.hrl").
--export([start_link/6, stop/1, send/4, send_recv/4, queue_lengths/1, write_pid/1]).
--export([init_loop/6]).
+-export([start_link/4, stop/1, send/4, send_recv/4, queue_lengths/1, write_pid/1]).
+-export([init_loop/4]).
 
 -record(state, {
   pool_id,
@@ -33,13 +33,11 @@
   socket_options,
   dict = dict:new(),
   socket_data = <<>>,
-  max_pipeline_depth,
-  disconnect_timeouts,
   timeout_count = 0
 }).
 
-start_link(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions) ->
-  Args = [PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions],
+start_link(PoolId, Host, Port, SocketOptions) ->
+  Args = [PoolId, Host, Port, SocketOptions],
   {ok, _} = proc_lib:start_link(?MODULE, init_loop, Args, ?CONN_TIMEOUT).
 
 stop(Pid) ->
@@ -63,22 +61,20 @@ write_pid(Pid) -> Pid.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-init_loop(PoolId, Host, Port, MaxPipelineDepth, DisconnectTimeouts, SocketOptions) ->
+init_loop(PoolId, Host, Port, SocketOptions) ->
   Socket = open_socket(Host, Port, SocketOptions),
   ok = proc_lib:init_ack({ok, self()}),
   loop(#state{
-    pool_id             = PoolId,
-    socket              = Socket,
-    host                = Host,
-    port                = Port,
-    socket_options      = SocketOptions,
-    max_pipeline_depth  = MaxPipelineDepth,
-    disconnect_timeouts = DisconnectTimeouts
+    pool_id        = PoolId,
+    socket         = Socket,
+    host           = Host,
+    port           = Port,
+    socket_options = SocketOptions
   }).
 
-loop(State = #state{socket = Socket,
-                    dict   = Dict}) ->
-  CanSend = (State#state.max_pipeline_depth == 0) or (dict:size(Dict) < State#state.max_pipeline_depth),
+loop(State = #state{pool_id = PoolId, socket = Socket, dict = Dict}) ->
+  MaxPipelineDepth = emongo:get_config(PoolId, max_pipeline_depth),
+  CanSend = (MaxPipelineDepth == 0) or (dict:size(Dict) < MaxPipelineDepth),
   NewState = try
     _NewState = receive
       % Calls to 'receive' will preserve the order of the message queue.  Calls to receive will not prioritize messages
@@ -116,7 +112,7 @@ loop(State = #state{socket = Socket,
         after 0 -> ok
         end,
         NewTimeoutCount = State#state.timeout_count + 1,
-        case NewTimeoutCount > State#state.disconnect_timeouts of
+        case NewTimeoutCount > emongo:get_config(PoolId, disconnect_timeouts) of
           true -> exit(emongo_too_many_timeouts);
           _    -> State#state{dict = dict:erase(ReqId, Dict), timeout_count = NewTimeoutCount}
         end;
@@ -143,6 +139,7 @@ loop(State = #state{socket = Socket,
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 open_socket(Host, Port, SocketOptions) ->
+  % TODO: We should probably use {active, once} and reset it when we receive each piece of data.
   Options = [binary, {active, true}, {keepalive, true} | SocketOptions], % {exit_on_close, true}
   case gen_tcp:connect(Host, Port, Options) of
     {ok, Sock}      -> Sock;

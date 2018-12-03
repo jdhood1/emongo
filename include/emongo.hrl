@@ -11,12 +11,16 @@
 -define(OP_KILL_CURSORS, 2007).
 -define(SYS_NAMESPACES, "system.namespaces").
 
--define(EXCEPTION(Fmt, Args), io:format("EXCEPTION (~p:~p): " Fmt "\n~p\n", [?MODULE, ?LINE | Args] ++
-                                                                            [erlang:get_stacktrace()])).
--define(ERROR(Fmt, Args),     io:format("ERROR (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(WARN(Fmt, Args),      io:format("WARNING (~p:~p): "   Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(INFO(Fmt, Args),      io:format("INFO (~p:~p): "      Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(DEBUG(Fmt, Args),     io:format("DEBUG (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
+%-include_lib("eunit/include/eunit.hrl").
+%-define(OUT(Fmt, Args), ?debugFmt(Fmt, Args)).
+-define(OUT(Fmt, Args), io:format(Fmt, Args)).
+
+-define(EXCEPTION(Fmt, Args), ?OUT("EXCEPTION (~p:~p): " Fmt "\n~p\n", [?MODULE, ?LINE | Args] ++
+                                                                       [erlang:get_stacktrace()])).
+-define(ERROR(Fmt, Args),     ?OUT("ERROR (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(WARN(Fmt, Args),      ?OUT("WARNING (~p:~p): "   Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(INFO(Fmt, Args),      ?OUT("INFO (~p:~p): "      Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(DEBUG(Fmt, Args),     ?OUT("DEBUG (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
 -define(DUMP(X),              ?DEBUG("~p = ~p", [??X, X])).
 
 -define(IS_LIST_DOCUMENT(Doc),
@@ -44,23 +48,19 @@
 	)
 ).
 
--record(pool, {id,
-               host,
-               port,
-               database,
-               size                  = 1,
-               auth_db               = undefined,
-               user                  = undefined,
-               pass_hash             = undefined,
-               max_pipeline_depth    = 0,
-               socket_options        = [],
-               conns                 = queue:new(),
-               req_id                = 1,
-               timeout               = 5000,
-               write_concern         = 1,
-               write_concern_timeout = 4000,
-               journal_write_ack     = false,
-               disconnect_timeouts   = 10,
-               max_wire_version      = undefined}).
+-record(pool, {
+  id,
+  host,
+  port,
+  database,
+  size           = 1,
+  auth_db        = undefined,
+  user           = undefined,
+  pass_hash      = undefined,
+  socket_options = [],
+  conns          = queue:new(),
+  req_id         = 1
+}).
+
 -record(header, {message_length, request_id, response_to, op_code}).
 -record(emo_query, {opts=0, offset=0, limit=0, q=[], field_selector=[]}).

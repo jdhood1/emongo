@@ -9,9 +9,10 @@
 -define(POOL_SIZE,         10).
 -define(COLL,              <<"test">>).
 -define(TIMEOUT,           60000).
--define(OUT(F, D),         ?debugFmt(F, D)).
+-define(TEST_OUT(F, D),    ?debugFmt(F, D)).
 -define(FUNCTION_NAME,     element(2, element(2, process_info(self(), current_function)))).
--define(STARTING,          ?OUT("~p", [?FUNCTION_NAME])).
+-define(STARTING,          OutputStartTimeMs = cur_time_ms(), ?TEST_OUT("~p", [?FUNCTION_NAME])).
+-define(ENDING,            clear_coll(), ?TEST_OUT("Test completed in ~p ms.", [cur_time_ms() - OutputStartTimeMs])).
 -define(TEST_DATABASE,     <<"testdatabase">>).
 
 run_test_() ->
@@ -38,7 +39,8 @@ run_test_() ->
       fun ?MODULE:test_struct_syntax/0,
       fun ?MODULE:test_aggregate/0,
       fun ?MODULE:test_encoding_performance/0,
-      fun ?MODULE:test_lots_of_documents/0,
+      fun ?MODULE:test_config_performance/0,
+      {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_lots_of_documents/0]},
       fun ?MODULE:test_large_data/0,
       {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_performance/0]}
     ]
@@ -47,7 +49,16 @@ run_test_() ->
 setup() ->
   ensure_started(sasl),
   ensure_started(emongo),
-  emongo:add_pool(?POOL, <<"localhost">>, 27017, ?TEST_DATABASE, ?POOL_SIZE),
+  Options = [
+    {max_pipeline_depth,    0},
+    {socket_options,        [{nodelay, false}]},
+    {write_concern,         1},
+    {write_concern_timeout, 4000},
+    {disconnect_timeouts,   10},
+    {default_read_pref,     <<"secondaryPreferred">>},
+    {max_batch_size,        1000}
+  ],
+  emongo:add_pool(?POOL, <<"localhost">>, 27017, ?TEST_DATABASE, ?POOL_SIZE, Options),
   emongo:delete_sync(?POOL, ?COLL),
   ok.
 
@@ -90,21 +101,37 @@ test_find() ->
     [{<<"a">>, 3}],
     [{<<"a">>, 4}]
   ], Res2),
-  Res3 = emongo:find(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
+  PrevMaxBatchSize = emongo:get_config(?POOL, max_batch_size),
+  emongo:update_pool_options(?POOL, [{max_batch_size, 2}]),
+  Res3 = emongo:find(?POOL, ?COLL, [], [{orderby, [{<<"a">>, asc}]}, {fields, [{<<"_id">>, 0}]}]),
+  ?assertEqual([
+    [{<<"a">>, 0}],
+    [{<<"a">>, 1}],
+    [{<<"a">>, 2}],
+    [{<<"a">>, 3}],
+    [{<<"a">>, 4}],
+    [{<<"a">>, 5}],
+    [{<<"a">>, 6}],
+    [{<<"a">>, 7}],
+    [{<<"a">>, 8}],
+    [{<<"a">>, 9}]
+  ], Res3),
+  emongo:update_pool_options(?POOL, [{max_batch_size, PrevMaxBatchSize}]),
+  Res4 = emongo:find(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
   ?assertEqual([
     [{<<"a">>, 9}],
     [{<<"a">>, 8}]
-  ], Res3),
-  Res4 = emongo:find_one(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, -1}]}, {fields, [{<<"_id">>, 0}]}]),
+  ], Res4),
+  Res5 = emongo:find_one(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, -1}]}, {fields, [{<<"_id">>, 0}]}]),
   ?assertEqual([
     [{<<"a">>, 9}]
-  ], Res4),
-  Res5 = emongo:find_all(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
+  ], Res5),
+  Res6 = emongo:find_all(?POOL, ?COLL, [], [{limit, 2}, {orderby, [{<<"a">>, desc}]}, {fields, [{<<"_id">>, 0}]}]),
   ?assertEqual([
     [{<<"a">>, 9}],
     [{<<"a">>, 8}]
-  ], Res5),
-  clear_coll().
+  ], Res6),
+  ?ENDING.
 
 test_update_sync() ->
   ?STARTING,
@@ -112,7 +139,7 @@ test_update_sync() ->
   ?assertEqual(0, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
   ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
   ?assertEqual(1, emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 1}]}])),
-  ok = clear_coll().
+  ?ENDING.
 
 test_upsert() ->
   ?STARTING,
@@ -128,46 +155,50 @@ test_upsert() ->
   ?assertEqual(1, UpsertRes2),
   Find2 = emongo:find(?POOL, ?COLL, Selector),
   ?assertEqual([Selector ++ [{<<"data">>, 2}]], Find2),
-  clear_coll().
+  ?ENDING.
 
 % TODO: Why isn't this working?
 %test_fetch_collections() ->
 %  ?STARTING,
 %  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
 %  Res = lists:sort(emongo:get_collections(?POOL)),
-%  ?OUT("Res = ~p", [Res]),
+%  ?TEST_OUT("Res = ~p", [Res]),
 %  ?assertEqual([?COLL], Res),
-%  clear_coll().
+%  ?ENDING.
 
 test_req_id_rollover() ->
   ?STARTING,
   {_, _} = gen_server:call(emongo, {conn, ?POOL, 2147483000}, infinity),
   {_, #pool{req_id = NextReq}} = gen_server:call(emongo, {conn, ?POOL, 1000000000}, infinity),
-  ?assertEqual(1, NextReq).
+  ?assertEqual(1, NextReq),
+  ?ENDING.
 
 test_timing() ->
   ?STARTING,
   emongo:clear_timing(),
   run_single_test(1, 1),
-  ?OUT("DB Total Time: ~p usec",  [emongo:total_db_time_usec()]),
-  ?OUT("DB Timing Breakdown: ~p", [emongo:db_timing()]),
-  ?OUT("DB Queue Lengths: ~p",    [emongo:queue_lengths()]).
+  ?TEST_OUT("DB Total Time: ~p usec",  [emongo:total_db_time_usec()]),
+  ?TEST_OUT("DB Timing Breakdown: ~p", [emongo:db_timing()]),
+  ?TEST_OUT("DB Queue Lengths: ~p",    [emongo:queue_lengths()]),
+  ?ENDING.
 
 test_drop_collection() ->
   ?STARTING,
   ok = emongo:drop_collection(?POOL, ?COLL),
-  ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL))).
+  ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL))),
+  ?ENDING.
 
 test_get_databases() ->
   ?STARTING,
   emongo:insert_sync(?POOL, ?COLL, [{<<"_id">>, <<"get_databases_test">>}]),
   Databases = lists:sort(emongo:get_databases(?POOL)),
   ?assert(lists:member(?TEST_DATABASE, Databases)),
-  clear_coll().
+  ?ENDING.
 
 test_drop_database() ->
   ?STARTING,
-  ok = emongo:drop_database(?POOL).
+  ok = emongo:drop_database(?POOL),
+  ?ENDING.
 
 test_empty_sel_with_orderby() ->
   ?STARTING,
@@ -177,19 +208,20 @@ test_empty_sel_with_orderby() ->
   ?assertEqual([[{<<"a">>, 1}],
                 [{<<"a">>, 2}]], Res),
   clear_coll(),
-  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [])).
+  ?assertEqual([], emongo:find_all(?POOL, ?COLL, [])),
+  ?ENDING.
 
 test_count() ->
   ?STARTING,
   emongo:insert_sync(?POOL, ?COLL, [[{<<"a">>, 1}], [{<<"a">>, 2}], [{<<"a">>, 3}], [{<<"a">>, 4}], [{<<"a">>, 5}]]),
-  %?OUT("Resp = ~p", [emongo:count(?POOL, ?COLL, [{<<"$or">>, [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}],
-  %                                [response_options])]),
+  %?TEST_OUT("Resp = ~p", [emongo:count(?POOL, ?COLL, [{<<"$or">>, [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}],
+  %                                     [response_options])]),
   ?assertEqual(5, emongo:count(?POOL, ?COLL, [])),
   ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"a">>, [{lte, 3}]}])),
   ?assertEqual(2, emongo:count(?POOL, ?COLL, [{<<"a">>, [{gt,  3}]}])),
   ?assertEqual(4, emongo:count(?POOL, ?COLL, [{<<"$or">>,  [[{<<"a">>, [{lte, 2}]}], [{<<"a">>, [{gte, 4}]}]]}])),
   ?assertEqual(3, emongo:count(?POOL, ?COLL, [{<<"$and">>, [[{<<"a">>, [{gte, 2}]}], [{<<"a">>, [{lte, 4}]}]]}])),
-  clear_coll().
+  ?ENDING.
 
 test_read_preferences() ->
   ?STARTING,
@@ -201,7 +233,7 @@ test_read_preferences() ->
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECONDARY])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_SECD_PREF])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_NEAREST])),
-  clear_coll().
+  ?ENDING.
 
 test_strip_selector() ->
   ?STARTING,
@@ -279,7 +311,8 @@ test_strip_selector() ->
       {<<"time">>,  undefined}
     ]}]}
   ],
-  ?assertEqual(ExpectedRes2, Stripped2).
+  ?assertEqual(ExpectedRes2, Stripped2),
+  ?ENDING.
 
 test_duplicate_key_error() ->
   ?STARTING,
@@ -289,8 +322,8 @@ test_duplicate_key_error() ->
     emongo:find_and_modify(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}], [{new, true}])),
   ?assertThrow({emongo_error, duplicate_key, _},
     emongo:update_sync(?POOL, ?COLL, [{<<"a">>, 1}], [{<<"$set">>, [{<<"a">>, 2}]}])),
-  clear_coll(),
-  emongo:drop_index(?POOL, ?COLL, <<"a_1">>).
+  emongo:drop_index(?POOL, ?COLL, <<"a_1">>),
+  ?ENDING.
 
 test_bulk_insert() ->
   ?STARTING,
@@ -312,7 +345,7 @@ test_bulk_insert() ->
   {array, WriteErrors} = proplists:get_value(<<"writeErrors">>, IErrorResDoc),
   ?assertEqual(Count, length(WriteErrors)),
   emongo:drop_index(?POOL, ?COLL, <<"index_1">>),
-  clear_coll().
+  ?ENDING.
 
 test_distinct() ->
   ?STARTING,
@@ -322,7 +355,7 @@ test_distinct() ->
   ?assertEqual([0, 1, 2, 3, 4], lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>))),
   ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], []))),
   ?assertEqual([0],             lists:sort(emongo:distinct(?POOL, ?COLL, <<"a.b">>, [{<<"c">>, 0}], [?USE_SECD_PREF]))),
-  clear_coll().
+  ?ENDING.
 
 test_struct_syntax() ->
   ?STARTING,
@@ -332,7 +365,7 @@ test_struct_syntax() ->
   emongo:update_sync(?POOL, ?COLL, Selector, [{"$set", [{"data", 1}]}], true),
   Find = emongo:find_all(?POOL, ?COLL, Selector),
   ?assertEqual([[{<<"_id">>, [{<<"a">>, <<"struct_syntax_test">>}]}, {<<"data">>, 1}]], Find),
-  clear_coll().
+  ?ENDING.
 
 test_aggregate() ->
   ?STARTING,
@@ -357,11 +390,11 @@ test_aggregate() ->
     [{<<"_id">>, 1}, {<<"sum_b">>, 5}]
   ], Res1),
   Res2 = (catch emongo:aggregate(?POOL, ?COLL, Aggregate, [{limit, 1}])),
-  %?OUT("Res2 = ~p", [Res2]),
+  %?TEST_OUT("Res2 = ~p", [Res2]),
   ?assertEqual([
     [{<<"_id">>, 2}, {<<"sum_b">>, 9}]
   ], Res2),
-  clear_coll().
+  ?ENDING.
 
 test_encoding_performance() ->
   ?STARTING,
@@ -370,22 +403,41 @@ test_encoding_performance() ->
       <<_/binary>> = emongo_bson:encode(?REALLY_BIG_DOCUMENT)
     end, lists:seq(1, 1000))
   end),
-  ?OUT("Encoding a really big document 1000 times took ~p microseconds", [EncodeTime]),
+  ?TEST_OUT("Encoding a really big document 1000 times took ~p microseconds", [EncodeTime]),
   {WriteTime, ok} = timer:tc(fun() ->
     lists:foreach(fun(_) ->
       emongo:insert_sync(?POOL, ?COLL, ?REALLY_BIG_DOCUMENT)
     end, lists:seq(1, 1000))
   end),
-  ?OUT("Encoding and writing a really big document to DB 1000 times took ~p microseconds", [WriteTime]),
-  clear_coll().
+  ?TEST_OUT("Encoding and writing a really big document to DB 1000 times took ~p microseconds", [WriteTime]),
+  ?ENDING.
+
+test_config_performance() ->
+  ?STARTING,
+  NumTests = 1000000,
+  StartTimeMs = cur_time_ms(),
+  lists:foreach(fun(_) ->
+    ok
+  end, lists:seq(1, NumTests)),
+  MidTimeMs = cur_time_ms(),
+  lists:foreach(fun(_) ->
+    emongo:get_config(?POOL, max_batch_size)
+  end, lists:seq(1, NumTests)),
+  EndTimeMs = cur_time_ms(),
+  OverheadTime = MidTimeMs - StartTimeMs,
+  TestTime     = EndTimeMs - MidTimeMs,
+  ConfigTime   = TestTime - OverheadTime,
+  ?TEST_OUT("~p config calls were made in ~p ms.", [NumTests, ConfigTime]),
+  ?ENDING.
 
 test_lots_of_documents() ->
   ?STARTING,
-  Docs = [[{<<"a">>, X}] || X <- lists:seq(1, 5000)],
+  Data = <<0:(8*2000)>>,
+  Docs = [[{<<"a">>, X}, {<<"data">>, Data}] || X <- lists:seq(1, 5000)],
   ok   = emongo:insert_sync(?POOL, ?COLL, Docs),
   Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]}]),
   ?assertEqual(Docs, Res),
-  clear_coll().
+  ?ENDING.
 
 test_large_data() ->
   ?STARTING,
@@ -394,14 +446,17 @@ test_large_data() ->
   [Res]   = emongo:find(?POOL, ?COLL),
   ResData = proplists:get_value(<<"data">>, Res),
   ?assertEqual(Data, ResData),
-  clear_coll().
+  ?ENDING.
 
 test_performance() ->
   ?STARTING,
+  PrevMaxBatchSize = emongo:get_config(?POOL, max_batch_size),
+  emongo:update_pool_options(?POOL, [{max_batch_size, 101}]),
   Ref = make_ref(),
   start_processes(Ref),
   block_until_done(Ref),
-  clear_coll().
+  emongo:update_pool_options(?POOL, [{max_batch_size, PrevMaxBatchSize}]),
+  ?ENDING.
 
 start_processes(Ref) ->
   Pid = self(),
@@ -436,8 +491,7 @@ run_single_test(X, Y) ->
     DRes = emongo:delete_sync(?POOL, ?COLL, Selector, [response_options]),
     ok = check_result(delete_sync, DRes, 1)
   catch _:E ->
-    ?OUT("Exception occurred for test ~.16b: ~p\n~p\n",
-              [Num, E, erlang:get_stacktrace()]),
+    ?TEST_OUT("Exception occurred for test ~.16b: ~p\n~p\n", [Num, E, erlang:get_stacktrace()]),
     throw(test_failed)
   end.
 
@@ -451,7 +505,7 @@ check_result(Desc,
      Ok == 1, Err == undefined, Desc == insert_sync, N == 1 -> ok;
      Ok == 1, Err == undefined, N == ExpectedN -> ok;
      true ->
-       ?OUT("Unexpected result for ~p: Ok = ~p; Err = ~p; N = ~p", [Desc, Ok, Err, N]),
+       ?TEST_OUT("Unexpected result for ~p: Ok = ~p; Err = ~p; N = ~p", [Desc, Ok, Err, N]),
        throw({error, invalid_db_response})
   end.
 
@@ -463,7 +517,7 @@ block_until_done(Ref, NumDone) ->
   ToAdd =
     receive {Ref, done} -> 1
     after 1000 ->
-      ?OUT("DB Queue Lengths: ~p", [emongo:queue_lengths()]),
+      ?TEST_OUT("DB Queue Lengths: ~p", [emongo:queue_lengths()]),
       0
     end,
   block_until_done(Ref, NumDone + ToAdd).
