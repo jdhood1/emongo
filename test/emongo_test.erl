@@ -455,12 +455,9 @@ test_large_data() ->
 
 test_performance() ->
   ?STARTING,
-  PrevMaxBatchSize = emongo:get_config(?POOL, max_batch_size),
-  emongo:update_pool_options(?POOL, [{max_batch_size, 101}]),
   Ref = make_ref(),
   start_processes(Ref),
   block_until_done(Ref),
-  emongo:update_pool_options(?POOL, [{max_batch_size, PrevMaxBatchSize}]),
   ?ENDING.
 
 start_processes(Ref) ->
