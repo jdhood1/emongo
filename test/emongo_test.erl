@@ -11,8 +11,8 @@
 -define(TIMEOUT,           60000).
 -define(TEST_OUT(F, D),    ?debugFmt(F, D)).
 -define(FUNCTION_NAME,     element(2, element(2, process_info(self(), current_function)))).
--define(STARTING,          OutputStartTimeMs = cur_time_ms(), ?TEST_OUT("~p", [?FUNCTION_NAME])).
--define(ENDING,            clear_coll(), ?TEST_OUT("Test completed in ~p ms.", [cur_time_ms() - OutputStartTimeMs])).
+-define(STARTING,          ?TEST_OUT("~p", [?FUNCTION_NAME]), OutputStartTimeMs = cur_time_ms()).
+-define(ENDING,            ?TEST_OUT("Test completed in ~p ms.", [cur_time_ms() - OutputStartTimeMs]), clear_coll()).
 -define(TEST_DATABASE,     <<"testdatabase">>).
 
 run_test_() ->
@@ -40,8 +40,8 @@ run_test_() ->
       fun ?MODULE:test_aggregate/0,
       fun ?MODULE:test_encoding_performance/0,
       fun ?MODULE:test_config_performance/0,
-      fun ?MODULE:test_lots_of_documents/0,
-      fun ?MODULE:test_large_data/0,
+      {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_lots_of_documents/0]},
+      {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_large_data/0]},
       {timeout, ?TIMEOUT div 1000, [fun ?MODULE:test_performance/0]}
     ]
   }].
@@ -50,13 +50,21 @@ setup() ->
   ensure_started(sasl),
   ensure_started(emongo),
   Options = [
+    {default_read_pref,     <<"secondaryPreferred">>},
+    {max_batch_size,        1000},
+    %{timeout,               5000},
     {max_pipeline_depth,    0},
-    {socket_options,        [{nodelay, false}]},
     {write_concern,         1},
     {write_concern_timeout, 4000},
+    %{journal_write_ack,     false},
     {disconnect_timeouts,   10},
-    {default_read_pref,     <<"secondaryPreferred">>},
-    {max_batch_size,        0}
+    %{auth_db,               undefined),
+    %{user,                  undefined)),
+    %{password,              undefined)),
+    {socket_options, [
+      {nodelay, false},
+      {buffer,  1048576}
+    ]}
   ],
   emongo:add_pool(?POOL, <<"localhost">>, 27017, ?TEST_DATABASE, ?POOL_SIZE, Options),
   emongo:delete_sync(?POOL, ?COLL),
@@ -435,7 +443,7 @@ test_lots_of_documents() ->
   Data = <<0:(8*2000)>>,
   Docs = [[{<<"a">>, X}, {<<"data">>, Data}] || X <- lists:seq(1, 5000)],
   ok   = emongo:insert_sync(?POOL, ?COLL, Docs),
-  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]}]),
+  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {orderby, [{<<"a">>, 1}]}, {timeout, ?TIMEOUT}]),
   ?assertEqual(Docs, Res),
   ?ENDING.
 
@@ -448,7 +456,7 @@ test_large_data() ->
   lists:foreach(fun(Doc) ->
     emongo:insert_sync(?POOL, ?COLL, Doc)
   end, Docs),
-  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}]),
+  Res  = emongo:find(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, {timeout, ?TIMEOUT}]),
   %?TEST_OUT("Res = ~p", [Res]),
   ?assertEqual(Docs, Res),
   ?ENDING.

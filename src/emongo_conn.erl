@@ -140,17 +140,13 @@ loop(State = #state{pool_id = PoolId, socket = Socket, dict = Dict}) ->
 
 open_socket(Host, Port, SocketOptions) ->
   BufferSize = proplists:get_value(buffer, SocketOptions, 1048576), % 1 MB: MongoDB 3.4+ sends up to 16 MB at a time.
+  BufferOptions = case BufferSize of
+    0 -> [];
+    _ -> [{sndbuf, BufferSize}, {recbuf, BufferSize}, {buffer, BufferSize}]
+  end,
+  % {exit_on_close, true}
   % TODO: We should probably use {active, once} and reset it when we receive each piece of data.
-  Options = [
-    binary,
-    {active, true},
-    {keepalive, true},
-    {sndbuf, BufferSize},
-    {recbuf, BufferSize},
-    {buffer, BufferSize}
-    % {exit_on_close, true}
-    | lists:keydelete(buffer, 1, SocketOptions)
-  ],
+  Options = [binary, {active, true}, {keepalive, true} | lists:keydelete(buffer, 1, SocketOptions) ++ BufferOptions],
   case gen_tcp:connect(Host, Port, Options) of
     {ok, Sock}      -> Sock;
     {error, Reason} -> exit({emongo_failed_to_open_socket, Reason})
