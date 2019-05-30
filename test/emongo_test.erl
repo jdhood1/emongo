@@ -2,6 +2,7 @@
 -include("emongo.hrl").
 -include("emongo_test.hrl").
 -compile(export_all).
+-compile(nowarn_export_all).
 
 -define(NUM_PROCESSES,     100).
 -define(NUM_TESTS_PER_PID, 500).
@@ -10,7 +11,6 @@
 -define(COLL,              <<"test">>).
 -define(TIMEOUT,           60000).
 -define(TEST_OUT(F, D),    ?debugFmt(F, D)).
--define(FUNCTION_NAME,     element(2, element(2, process_info(self(), current_function)))).
 -define(STARTING,          ?TEST_OUT("~p", [?FUNCTION_NAME]), OutputStartTimeMs = cur_time_ms()).
 -define(ENDING,            ?TEST_OUT("Test completed in ~p ms.", [cur_time_ms() - OutputStartTimeMs]), clear_coll()).
 -define(TEST_DATABASE,     <<"testdatabase">>).
@@ -500,8 +500,8 @@ run_single_test(X, Y) ->
 
     DRes = emongo:delete_sync(?POOL, ?COLL, Selector, [response_options]),
     ok = check_result(delete_sync, DRes, 1)
-  catch _:E ->
-    ?TEST_OUT("Exception occurred for test ~.16b: ~p\n~p\n", [Num, E, erlang:get_stacktrace()]),
+  catch _:E:S ->
+    ?TEST_OUT("Exception occurred for test ~.16b: ~p\n~p\n", [Num, E, S]),
     throw(test_failed)
   end.
 

@@ -23,7 +23,6 @@
 -module(emongo_bson).
 -include("emongo.hrl").
 -export([encode/1, decode/1]).
--compile(export_all).
 
 encode([]) ->
   <<5,0,0,0,0>>;

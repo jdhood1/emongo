@@ -121,7 +121,7 @@ loop(State = #state{pool_id = PoolId, socket = Socket, dict = Dict}) ->
       emongo_listen_exited         -> exit(emongo_listen_exited);
       emongo_conn_close            -> exit(emongo_conn_close)
     end
-  catch Class:Error ->
+  catch Class:Error:StackTrace ->
     gen_tcp:close(Socket),
     % The Pids waiting for responses in Dict will get errors when this Pid exits.  They don't have to wait for a
     % timeout.
@@ -130,8 +130,8 @@ loop(State = #state{pool_id = PoolId, socket = Socket, dict = Dict}) ->
       emongo_conn_close        -> exit(shutdown);
       emongo_too_many_timeouts -> exit(normal);
       _                        ->
-        ?EXCEPTION("Exiting: ~p", [Error]),
-        erlang:raise(Class, Error, erlang:get_stacktrace())
+        ?EXCEPTION("Exiting: ~p", [Error], StackTrace),
+        erlang:raise(Class, Error, StackTrace)
     end
   end,
   loop(NewState).

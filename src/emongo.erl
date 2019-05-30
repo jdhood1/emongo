@@ -988,7 +988,7 @@ do_auth(Conn, #pool{id = PoolId, database = DefaultDatabase} = Pool) ->
 
 do_auth([], _Conn, Pool) -> Pool;
 do_auth([DB | Others], Conn, #pool{user = User, pass_hash = PassHash} = Pool) ->
-  Bytes = crypto:rand_bytes(6),
+  Bytes = crypto:strong_rand_bytes(6),
   ClientNonce = base64:encode(emongo:dec2hex(Bytes)),
 
   % Client initiates SCRAM auth session with username and a random number (ClientNonce)
@@ -1384,8 +1384,8 @@ time_call({Command, Collection, Selector, _Options}, Fun) ->
   {TimeUsec, Res} = timer:tc(fun() ->
     try
       Fun()
-    catch C:E ->
-      {exception, C, E, erlang:get_stacktrace()}
+    catch C:E:S ->
+      {exception, C, E, S}
     end
   end),
   PreviousTiming = case erlang:get(?TIMING_KEY) of

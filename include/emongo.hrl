@@ -15,13 +15,13 @@
 %-define(OUT(Fmt, Args), ?debugFmt(Fmt, Args)).
 -define(OUT(Fmt, Args), io:format(Fmt, Args)).
 
--define(EXCEPTION(Fmt, Args), ?OUT("EXCEPTION (~p:~p): " Fmt "\n~p\n", [?MODULE, ?LINE | Args] ++
-                                                                       [erlang:get_stacktrace()])).
--define(ERROR(Fmt, Args),     ?OUT("ERROR (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(WARN(Fmt, Args),      ?OUT("WARNING (~p:~p): "   Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(INFO(Fmt, Args),      ?OUT("INFO (~p:~p): "      Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(DEBUG(Fmt, Args),     ?OUT("DEBUG (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
--define(DUMP(X),              ?DEBUG("~p = ~p", [??X, X])).
+-define(EXCEPTION(Fmt, Args, StackTrace),
+  ?OUT("EXCEPTION (~p:~p): " Fmt "\n~p\n", [?MODULE, ?LINE | Args] ++ [StackTrace])).
+-define(ERROR(Fmt, Args), ?OUT("ERROR (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(WARN(Fmt, Args),  ?OUT("WARNING (~p:~p): "   Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(INFO(Fmt, Args),  ?OUT("INFO (~p:~p): "      Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(DEBUG(Fmt, Args), ?OUT("DEBUG (~p:~p): "     Fmt "\n",     [?MODULE, ?LINE | Args])).
+-define(DUMP(X),          ?DEBUG("~p = ~p", [??X, X])).
 
 -define(IS_LIST_DOCUMENT(Doc),
   ( is_list(Doc) andalso
