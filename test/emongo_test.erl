@@ -23,7 +23,7 @@ run_test_() ->
       fun ?MODULE:test_find/0,
       fun ?MODULE:test_update_sync/0,
       fun ?MODULE:test_upsert/0,
-      %fun ?MODULE:test_fetch_collections/0,
+      fun ?MODULE:test_get_collections/0,
       fun ?MODULE:test_req_id_rollover/0,
       fun ?MODULE:test_timing/0,
       fun ?MODULE:test_drop_collection/0,
@@ -165,14 +165,13 @@ test_upsert() ->
   ?assertEqual([Selector ++ [{<<"data">>, 2}]], Find2),
   ?ENDING.
 
-% TODO: Why isn't this working?
-%test_fetch_collections() ->
-%  ?STARTING,
-%  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
-%  Res = lists:sort(emongo:get_collections(?POOL)),
-%  ?TEST_OUT("Res = ~p", [Res]),
-%  ?assertEqual([?COLL], Res),
-%  ?ENDING.
+test_get_collections() ->
+  ?STARTING,
+  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  Res = emongo:get_collections(?POOL),
+  %?TEST_OUT("Res = ~p", [Res]),
+  ?assertEqual([?COLL], lists:sort(Res)),
+  ?ENDING.
 
 test_req_id_rollover() ->
   ?STARTING,
@@ -192,20 +191,25 @@ test_timing() ->
 
 test_drop_collection() ->
   ?STARTING,
+  ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
   ok = emongo:drop_collection(?POOL, ?COLL),
   ?assertEqual(false, lists:member(?COLL, emongo:get_collections(?POOL))),
   ?ENDING.
 
 test_get_databases() ->
   ?STARTING,
-  emongo:insert_sync(?POOL, ?COLL, [{<<"_id">>, <<"get_databases_test">>}]),
-  Databases = lists:sort(emongo:get_databases(?POOL)),
+  emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  Databases = emongo:get_databases(?POOL),
   ?assert(lists:member(?TEST_DATABASE, Databases)),
+  emongo:delete_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
   ?ENDING.
 
 test_drop_database() ->
   ?STARTING,
+  emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
   ok = emongo:drop_database(?POOL),
+  Databases = emongo:get_databases(?POOL),
+  ?assertEqual(false, lists:member(?TEST_DATABASE, Databases)),
   ?ENDING.
 
 test_empty_sel_with_orderby() ->

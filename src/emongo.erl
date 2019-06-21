@@ -45,7 +45,7 @@
          distinct/3, distinct/4, distinct/5,
          ensure_index/4, create_index/4, create_index/5, drop_index/3,
          aggregate/3, aggregate/4,
-         get_collections/1, get_collections/2,
+         get_collections/1, get_collections/2, get_collections/3,
          run_command/3, run_command/2,
          count/2, count/3, count/4,
          total_db_time_usec/0, db_timing/0, clear_timing/0,
@@ -648,38 +648,40 @@ drop_collection(PoolId, Collection, Options) when is_atom(PoolId) ->
     true     -> throw({emongo_drop_collection_failed, error_msg(Resp)})
   end.
 
-get_collections(PoolId) -> get_collections(PoolId, []).
-get_collections(PoolId, OptionsIn) ->
+get_collections(PoolId)           -> get_collections(PoolId, undefined).
+get_collections(PoolId, Database) -> get_collections(PoolId, Database, []).
+get_collections(PoolId, DatabaseIn, OptionsIn) ->
   Options      = set_read_preference(PoolId, OptionsIn),
-  Query        = create_query(Options, []),
+  TQuery       = create_query(Options, [{<<"listCollections">>, 1}]),
+  Query        = TQuery#emo_query{limit = -1}, % dont ask me why, it just has to be -1
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
-  Database     = to_binary(get_database(Pool, undefined)),
-  Packet       = emongo_packet:do_query(Database, ?SYS_NAMESPACES, Pool#pool.req_id, Query),
-  Resp         = send_recv_command(get_collections, ?SYS_NAMESPACES, Query, Options, Conn, Pool, Packet),
-  case lists:member(response_options, Options) of
-    true  -> Resp;
-    false ->
-      Docs = response_docs(Resp),
-      DatabaseForSplit = <<Database/binary, ".">>,
-      lists:foldl(fun(Doc, Accum) ->
-        Collection = proplists:get_value(<<"name">>, Doc),
-        case binary:match(Collection, <<".$">>) of
-          nomatch ->
-            [_Junk, RealName] = binary:split(Collection, DatabaseForSplit),
-            [ RealName | Accum ];
-          _ -> Accum
-        end
-      end, [], Docs)
+  Database     = case DatabaseIn of
+    undefined -> to_binary(get_database(Pool, undefined));
+    _         -> to_binary(DatabaseIn)
+  end,
+  Packet       = emongo_packet:do_query(Database, "$cmd", Pool#pool.req_id, Query),
+  Resp         = send_recv_command(get_databases, "$cmd", Query, Options, Conn, Pool, Packet),
+  RespOpts     = lists:member(response_options, Options),
+  RespOk       = response_ok(Resp),
+  if
+    RespOpts -> Resp;
+    RespOk   ->
+      CursorInfo    = proplists:get_value(<<"cursor">>,     response_first_doc(Resp)),
+      {array, Docs} = proplists:get_value(<<"firstBatch">>, CursorInfo),
+      CursorId      = proplists:get_value(<<"id">>,         CursorInfo, Resp#response.cursor_id),
+      NewResp       = get_all(PoolId, undefined, Options, Resp#response{cursor_id = CursorId, documents = Docs}),
+      Docs          = response_docs(NewResp),
+      [proplists:get_value(<<"name">>, Doc) || Doc <- Docs];
+    true     -> throw({emongo_get_collections_failed, error_msg(Resp)})
   end.
 
 get_databases(PoolId) -> get_databases(PoolId, []).
-
 get_databases(PoolId, OptionsIn) ->
   Options      = set_read_preference(PoolId, OptionsIn),
   TQuery       = create_query(Options, [{<<"listDatabases">>, 1}]),
   Query        = TQuery#emo_query{limit=-1}, %dont ask me why, it just has to be -1
-  Database     = <<"admin">>,
   {Conn, Pool} = gen_server:call(?MODULE, {conn, PoolId}, infinity),
+  Database     = <<"admin">>,
   Packet       = emongo_packet:do_query(Database, "$cmd", Pool#pool.req_id, Query),
   Resp         = send_recv_command(get_databases, "$cmd", Query, Options, Conn, Pool, Packet),
   RespOpts     = lists:member(response_options, Options),
