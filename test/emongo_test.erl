@@ -47,7 +47,6 @@ run_test_() ->
   }].
 
 setup() ->
-  ensure_started(sasl),
   ensure_started(emongo),
   Options = [
     {default_read_pref,     <<"secondaryPreferred">>},
