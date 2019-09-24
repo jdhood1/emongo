@@ -13,7 +13,9 @@ compile:
 check: compile
 	@mkdir -p $(eunit_dir)
 	@rm -rf $(eunit_dir)/*.log
-	@bash -c "set -o pipefail && ./rebar eunit skip_deps=true $(suites_opt) | tee $(eunit_dir)/test.log"
+	@bash -c "set -o pipefail && \
+	  ./rebar eunit skip_deps=true $(suites_opt) \
+	  | tee $(eunit_dir)/test.log"
 
 clean:
 	@./rebar clean
