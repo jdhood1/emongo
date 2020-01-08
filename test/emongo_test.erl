@@ -13,7 +13,7 @@
 -define(TEST_OUT(F, D),    ?debugFmt(F, D)).
 -define(STARTING,          ?TEST_OUT("~p", [?FUNCTION_NAME]), OutputStartTimeMs = cur_time_ms()).
 -define(ENDING,            ?TEST_OUT("Test completed in ~p ms.", [cur_time_ms() - OutputStartTimeMs]), clear_coll()).
--define(TEST_DATABASE,     <<"testdatabase">>).
+-define(TEST_DATABASE,     <<"emongo_unit_test_db">>).
 
 run_test_() ->
   [{setup,
@@ -49,7 +49,7 @@ run_test_() ->
 setup() ->
   ensure_started(emongo),
   Options = [
-    {default_read_pref,     <<"secondaryPreferred">>},
+    {default_read_pref,     <<"primary">>},
     {max_batch_size,        1000},
     %{timeout,               5000},
     {max_pipeline_depth,    0},
@@ -489,8 +489,12 @@ run_single_test(X, Y) ->
     IRes = emongo:insert_sync(?POOL, ?COLL, Selector, [response_options]),
     ok = check_result(insert_sync, IRes, 0),
 
-    [FMRes] = emongo:find_and_modify(?POOL, ?COLL, Selector,
-      [{<<"$set">>, [{<<"fm">>, Num}]}], [{new, true}]),
+    % Test reading the data right away to make sure the insert_sync waited until the data was readable from at least the
+    % primary replica member.
+    IFRes = emongo:find_all(?POOL, ?COLL, Selector),
+    ?assertEqual([Selector], IFRes),
+
+    [FMRes] = emongo:find_and_modify(?POOL, ?COLL, Selector, [{<<"$set">>, [{<<"fm">>, Num}]}], [{new, true}]),
     FMVal = proplists:get_value(<<"value">>, FMRes),
     ?assertEqual(Selector ++ [{<<"fm">>, Num}], FMVal),
 
