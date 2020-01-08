@@ -57,9 +57,9 @@ setup() ->
     {write_concern_timeout, 4000},
     %{journal_write_ack,     false},
     {disconnect_timeouts,   10},
-    %{auth_db,               undefined),
-    %{user,                  undefined)),
-    %{password,              undefined)),
+    %{auth_db,               undefined},
+    %{user,                  undefined},
+    %{password,              undefined},
     {socket_options, [
       {nodelay, false},
       {buffer,  1048576}
@@ -237,6 +237,7 @@ test_count() ->
 test_read_preferences() ->
   ?STARTING,
   ok = emongo:insert_sync(?POOL, ?COLL, [{<<"a">>, 1}]),
+  %timer:sleep(1000), % Allow replica members to sync.
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?SLAVE_OK])),
   ?assertEqual([[{<<"a">>, 1}]], emongo:find_all(?POOL, ?COLL, [], [{fields, [{<<"_id">>, 0}]}, ?USE_PRIMARY])),
