@@ -46,7 +46,7 @@
          ensure_index/4, create_index/4, create_index/5, drop_index/3,
          aggregate/3, aggregate/4,
          get_collections/1, get_collections/2, get_collections/3,
-         run_command/3, run_command/2,
+         run_command/2, run_command/3,
          count/2, count/3, count/4,
          total_db_time_usec/0, db_timing/0, clear_timing/0,
          dec2hex/1, hex2dec/1, utf8_encode/1,
